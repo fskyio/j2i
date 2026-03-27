@@ -1,0 +1,117 @@
+# j2i - XMPP-to-IRC bridge configuration
+
+# ==============================================================================
+# XMPP connections
+# ==============================================================================
+# Each [[xmpp]] entry defines an XMPP account or component the bridge uses.
+# Give each a unique "name" to reference it in [[bridge]] entries.
+
+[[xmpp]]
+name = "myserver"
+jid = "bridge@example.com"
+password = "secret"
+
+# Set to true to connect as an XEP-0114 component instead of a regular user.
+# Requires server admin to configure the component subdomain.
+# When false, the bridge connects as a regular XMPP user/bot.
+component = false
+
+# Only used when component = true.
+# component_domain: the component's subdomain, configured on the XMPP server.
+#   Puppet JIDs will be created under this domain (e.g. johndoe.libera@irc.example.org).
+# component_host: host of the XMPP server's component listener (default: "localhost").
+# component_port: port of the component listener (default: 5347).
+# component_domain = "irc.example.org"
+# component_host = "localhost"
+# component_port = 5347
+
+# Nick used by the bridge's master JID when joining MUCs.
+nick = "IRC Bridge"
+
+# --- Component-mode example ---
+# [[xmpp]]
+# name = "mycomponent"
+# password = "shared-secret"    # shared secret configured in your XMPP server
+# component = true
+# component_domain = "irc.example.org"
+# component_host = "localhost"
+# component_port = 5347
+# nick = "IRC Bridge"
+
+# ==============================================================================
+# IRC networks
+# ==============================================================================
+# Each [[irc]] entry defines a connection to an IRC network.
+# Give each a unique "name" to reference it in [[bridge]] entries.
+
+[[irc]]
+name = "libera"
+host = "irc.libera.chat"
+port = 6697
+tls = true
+nick = "xmpp-bridge"
+
+# Password for SASL authentication (optional).
+# sasl_password = "secret"
+
+# NickServ password (optional, used if SASL is not available).
+# nickserv_password = "secret"
+
+# Enable XMPP user puppeting on IRC via RELAYMSG.
+# Requires the IRC network to support RELAYMSG and the bot to have +o in the channel.
+# When false, falls back to "<nick> message" format.
+relaymsg = true
+
+# ==============================================================================
+# Bridge mappings
+# ==============================================================================
+# Each [[bridge]] entry connects an XMPP MUC to an IRC channel.
+# "xmpp" and "irc" reference the "name" fields from the sections above.
+
+[[bridge]]
+xmpp = "myserver"
+xmpp_muc = "general@conference.example.com"
+irc = "libera"
+irc_channel = "#general"
+
+[[bridge]]
+xmpp = "myserver"
+xmpp_muc = "offtopic@conference.example.com"
+irc = "libera"
+irc_channel = "#offtopic"
+
+# Per-bridge overrides (optional). When set, these override the global [settings]
+# for this specific bridge mapping only. Omit to use the global defaults.
+# anti_ping = false
+# max_lines = 10
+# pastebin = "txt.t0.vc"
+# pastebin_auth = "Bearer mytoken"
+# pastebin_field = "txt"
+
+# ==============================================================================
+# General settings
+# ==============================================================================
+[settings]
+
+# Insert an anti-ping character (zero-width space) into nicks when relaying
+# messages as text, to avoid accidentally pinging users on the other side.
+anti_ping = true
+
+# Maximum number of lines to relay individually from a multi-line XMPP message.
+# Messages exceeding this will be uploaded to a pastebin instead (if configured).
+# Set to 0 for unlimited (no pastebin, always split).
+max_lines = 20
+
+# Pastebin service for long messages. When a multi-line XMPP message exceeds
+# max_lines, it is uploaded here and the link is sent to IRC instead of flooding.
+# Supported: "txt.t0.vc", "kmi.aeza.net", or a custom URL.
+# Leave unset to truncate long messages instead of uploading.
+# pastebin = "txt.t0.vc"
+
+# Authorization header for the pastebin service (optional).
+# Value is sent as-is in the Authorization header (e.g. "Bearer mytoken").
+# pastebin_auth = "Bearer mytoken"
+
+# Override the form field name for custom pastebin services (optional).
+# Known services (txt.t0.vc, kmi.aeza.net) use their own field names automatically.
+# pastebin_field = "txt"

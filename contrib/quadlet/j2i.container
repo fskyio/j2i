@@ -1,0 +1,19 @@
+[Unit]
+Description=j2i
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+AutoUpdate=registry
+ContainerName=j2i
+DropCapability=ALL
+Image=foundry.fsky.io/telepath/j2i:latest
+NoNewPrivileges=true
+ReadOnly=true
+Volume=%h/j2i/config/config.toml:/config/config.toml:ro
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target default.target
