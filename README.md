@@ -67,15 +67,23 @@ The config has four sections:
 - `[[bridge]]` - one entry per MUC↔channel pair, referencing the `name` fields above
 - `[settings]` - global defaults (`anti_ping`, `max_lines`, `pastebin`, etc.); can be overridden per `[[bridge]]`
 
-### Plumbing mode (simple setup)
+### Basic plumbing mode (simple setup)
 
 Set `component = false` in `[[xmpp]]` and `relaymsg = false` in `[[irc]]`. The bridge connects as a regular XMPP user and IRC bot and relays messages as `<nick> text`. No special server configuration needed.
 
 ### Puppeteering mode (full setup)
 
-**IRC side:** Set `relaymsg = true` in `[[irc]]`. The IRC bot must have operator status (`+o`) in the channel. The bridge detects RELAYMSG support on connect and falls back to plumbing mode if unavailable.
+**IRC side:** Set `relaymsg = true` in `[[irc]]`. The IRC bot must have operator status (`+o`) in the channel. The bridge detects RELAYMSG support on connect and falls back to basic plumbing mode if unavailable.
 
 **XMPP side:** Set `component = true` in `[[xmpp]]` and configure your XMPP server with a component subdomain. Each IRC user will appear in the MUC as a puppet JID under that domain (e.g. `johndoe.libera@irc.example.org`). Puppet nicks on IRC get a `/xmpp` suffix (e.g. `alice/xmpp`) to distinguish them from real IRC users.
+
+## Support chatroom
+If you want to ask anything or need assistance with j2i, we have a public chatroom on XMPP and IRC.
+
+- XMPP: [j2i@room.telepath.im](xmpp:j2i@room.telepath.im?join)
+- IRC: #j2i on [irc.telepath.im](https://telepath.im/irc/)
+
+The MUC and channel are bridged together with j2i.
 
 ## License
 
