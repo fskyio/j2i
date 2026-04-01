@@ -164,6 +164,9 @@ class Bridge:
             client.on_message = self._make_xmpp_handler(xmpp_name)
             client.on_self_message = self._on_xmpp_self_message
 
+        for xmpp_name, component in self.xmpp_components.items():
+            component.on_reconnected = self._make_xmpp_reconnect_handler(xmpp_name)
+
     async def _connect_all(self) -> None:
         tasks: list[asyncio.Task] = []
 
@@ -428,6 +431,24 @@ class Bridge:
                     new_pjid = _puppet_jid(new_nick, irc_cfg.name, domain)
                     await component.part_puppet(b.xmpp_muc, old_pjid, old_nick)
                     await component.join_puppet(b.xmpp_muc, new_pjid, new_nick)
+
+        return handler
+
+    def _make_xmpp_reconnect_handler(self, xmpp_name: str):
+        """After XMPP component reconnects, re-request NAMES on all bridged IRC channels.
+
+        This re-triggers on_names_done which calls join_puppet for every current
+        IRC member, repopulating _puppet_nicks so IRC→XMPP bridging resumes.
+        """
+        async def handler() -> None:
+            log.info("XMPP component %s reconnected, re-joining puppets", xmpp_name)
+            for b in self.config.bridges:
+                if b.xmpp != xmpp_name or b.xmpp not in self.xmpp_components:
+                    continue
+                irc_client = self.irc_clients.get(b.irc)
+                if irc_client is None:
+                    continue
+                await irc_client.request_names(b.irc_channel)
 
         return handler
 

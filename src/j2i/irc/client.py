@@ -151,6 +151,9 @@ class IRCClient:
         await self._send(f"JOIN {channel}")
         self.channels.setdefault(channel.lower(), False)
 
+    async def request_names(self, channel: str) -> None:
+        await self._send(f"NAMES {channel}")
+
     async def send_message(
         self, channel: str, text: str, reply_to: str | None = None
     ) -> None:

@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from typing import Callable, Awaitable
 
 import slixmpp
 
 from j2i.xmpp.client import XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback
+
+ReconnectedCallback = Callable[[], Awaitable[None]]
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,7 @@ class XMPPComponent:
         self._master_jid = f"bridge@{component_domain}"
         self._mucs: list[str] = []
         self._connected = asyncio.Event()
+        self._reconnecting = False
 
         # muc_jid.lower() -> {puppet_jid -> actual_muc_nick}
         # The actual nick may differ from the IRC nick after a collision.
@@ -54,6 +58,7 @@ class XMPPComponent:
         self.on_message: MessageCallback | None = None
         self.on_self_message: SelfMessageCallback | None = None
         self.on_typing: TypingCallback | None = None
+        self.on_reconnected: ReconnectedCallback | None = None
 
         self._xmpp = slixmpp.ComponentXMPP(
             component_domain, password, component_host, component_port
@@ -284,12 +289,17 @@ class XMPPComponent:
                 log.info("Component master joined XMPP MUC: %s", room)
             except Exception as e:
                 log.warning("Failed to join MUC %s: %s", room, e)
+        is_reconnect = self._reconnecting
+        self._reconnecting = False
         self._connected.set()
+        if is_reconnect and self.on_reconnected:
+            asyncio.ensure_future(self.on_reconnected())
 
     async def _on_disconnected(self, _event: dict) -> None:
         log.warning("XMPP component disconnected, reconnecting...")
         self._connected.clear()
         self._puppet_nicks.clear()
+        self._reconnecting = True
         await asyncio.sleep(2)
         self._xmpp.connect()
 
