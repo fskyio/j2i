@@ -18,6 +18,9 @@ ANTI_PING_CHAR = "\u200b"  # zero-width space
 # Max number of message ID -> nick mappings to keep per MUC
 _NICK_MAP_SIZE = 500
 
+# Max characters in an inline reply excerpt shown on IRC
+_REPLY_QUOTE_MAX = 60
+
 # Reconnect backoff
 _RECONNECT_BASE = 2  # seconds
 _RECONNECT_MAX = 300  # 5 minutes
@@ -92,12 +95,27 @@ class Bridge:
             collections.OrderedDict()
         )
 
+        # Body cache for inline reply excerpts: XMPP stanza-id → message body.
+        # Populated for both XMPP messages (on receipt) and IRC messages (once
+        # the echo maps client_id → stanza-id in _on_xmpp_self_message).
+        self._body_cache: collections.OrderedDict[str, str] = (
+            collections.OrderedDict()
+        )
+        # Temp: XMPP client_id → body (until stanza-id is known)
+        self._pending_body: dict[str, str] = {}
+
     def _setting(self, b: BridgeMapping, name: str):
         """Resolve a setting: per-bridge override if set, else global."""
         val = getattr(b, name, None)
         if val is not None:
             return val
         return getattr(self.config.settings, name)
+
+    def _cache_body(self, stanza_id: str, body: str) -> None:
+        """Store a message body in the bounded reply-excerpt cache."""
+        self._body_cache[stanza_id] = body
+        if len(self._body_cache) > _NICK_MAP_SIZE:
+            self._body_cache.popitem(last=False)
 
     async def start(self) -> None:
         self._build_clients()
@@ -255,6 +273,10 @@ class Bridge:
             if len(self._xmpp_sid_to_irc_msgid) > _NICK_MAP_SIZE:
                 self._xmpp_sid_to_irc_msgid.popitem(last=False)
 
+        body = self._pending_body.pop(client_id, None)
+        if body is not None:
+            self._cache_body(stanza_id, body)
+
     def _strip_reply_prefix(self, text: str, xmpp_sid: str) -> str:
         """Strip the IRC client's 'nick: ' reply fallback when sending a native reply."""
         replied_nick = self._msg_id_to_irc_nick.get(xmpp_sid)
@@ -297,6 +319,7 @@ class Bridge:
                     if not msg_id:
                         continue
                     self._record_msg_id(msg_id, nick)
+                    self._pending_body[msg_id] = relay_text
                     if irc_msg.msgid:
                         self._xmpp_cid_to_irc_msgid[msg_id] = irc_msg.msgid
                     # Track sender MUC JID for future replies to this message
@@ -320,6 +343,7 @@ class Bridge:
                             b.xmpp_muc, f"<{display_nick}> {relay_text}"
                         )
                     self._record_msg_id(msg_id, nick)
+                    self._pending_body[msg_id] = relay_text
                     if irc_msg.msgid:
                         self._xmpp_cid_to_irc_msgid[msg_id] = irc_msg.msgid
                     # Track sender MUC JID for future replies to this message
@@ -511,6 +535,11 @@ class Bridge:
 
             key = (xmpp_name, msg.muc_jid.lower())
             bridges = self._xmpp_to_bridges.get(key, [])
+
+            # Cache body for reply excerpts (keyed by XMPP stanza-id)
+            if msg.stanza_id:
+                self._cache_body(msg.stanza_id, msg.body)
+
             for b in bridges:
                 irc_client = self.irc_clients[b.irc]
                 irc_cfg = self.config.irc_by_name(b.irc)
@@ -571,41 +600,58 @@ class Bridge:
         msg: XMPPMessage,
         irc_client: IRCClient,
         irc_cfg: IRCConfig,
+        b: BridgeMapping,
         xmpp_name: str | None = None,
     ) -> str:
-        """Build a reply mention prefix like 'nick: ' for smart replies."""
+        """Build a reply prefix for smart replies.
+
+        With reply_style='quote' (default) and a cache hit, returns:
+            "nick: [excerpt] "
+        Falls back to ping-only "nick: " when the cache misses or
+        reply_style='ping'.
+        """
         if not msg.reply_to_nick:
             return ""
 
-        # Check if the replied-to message was sent by the bridge on behalf
-        # of an IRC user - if so, use the original IRC nick directly
         log.debug(
             "Reply lookup: reply_to_id=%s, known_ids=%s",
             msg.reply_to_id,
             list(self._msg_id_to_irc_nick.keys())[-5:],
         )
+
+        # Resolve the target IRC nick
         if msg.reply_to_id and msg.reply_to_id in self._msg_id_to_irc_nick:
+            # Replied-to message was bridged from IRC; use the real IRC nick
             target = self._msg_id_to_irc_nick[msg.reply_to_id]
-            return f"{target}: "
+        else:
+            target = msg.reply_to_nick
+            if xmpp_name in self.xmpp_components:
+                component = self.xmpp_components[xmpp_name]
+                if not component.is_puppet_nick(msg.muc_jid, target):
+                    # Native XMPP user: add /xmpp suffix when relaymsg is active
+                    if irc_cfg.relaymsg and irc_client.has_relaymsg:
+                        target = (
+                            sanitize_irc_nick(target)
+                            + irc_client.relaymsg_separator
+                            + "xmpp"
+                        )
+            elif irc_cfg.relaymsg and irc_client.has_relaymsg:
+                target = (
+                    sanitize_irc_nick(target)
+                    + irc_client.relaymsg_separator
+                    + "xmpp"
+                )
 
-        target = msg.reply_to_nick
+        # Include an inline excerpt when reply_style is 'quote' and we have
+        # the original body cached
+        if self._setting(b, "reply_style") == "quote" and msg.reply_to_id:
+            cached_body = self._body_cache.get(msg.reply_to_id)
+            if cached_body:
+                excerpt = cached_body.replace("\n", " ").strip()
+                if len(excerpt) > _REPLY_QUOTE_MAX:
+                    excerpt = excerpt[: _REPLY_QUOTE_MAX - 1] + "…"
+                return f'(re {target}: "{excerpt}") '
 
-        # In component mode the replied-to nick might be an IRC puppet -
-        # those are real IRC users and should be pinged directly, not with
-        # a /xmpp suffix.
-        if xmpp_name in self.xmpp_components:
-            component = self.xmpp_components[xmpp_name]
-            if component.is_puppet_nick(msg.muc_jid, target):
-                return f"{target}: "
-
-        # Native XMPP user: if relaymsg is active they appear on IRC
-        # with a /xmpp suffix
-        if irc_cfg.relaymsg and irc_client.has_relaymsg:
-            target = (
-                sanitize_irc_nick(target)
-                + irc_client.relaymsg_separator
-                + "xmpp"
-            )
         return f"{target}: "
 
     def _format_correction(self, text: str) -> str:
@@ -625,7 +671,7 @@ class Bridge:
         if msg.is_correction:
             text = self._format_correction(text)
 
-        reply_prefix = self._format_reply_prefix(msg, irc_client, irc_cfg, xmpp_name)
+        reply_prefix = self._format_reply_prefix(msg, irc_client, irc_cfg, b, xmpp_name)
 
         # Look up native IRC reply tag for XEP-0461 replies
         irc_reply_to = (

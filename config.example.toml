@@ -87,6 +87,7 @@ irc_channel = "#offtopic"
 # pastebin = "txt.t0.vc"
 # pastebin_auth = "Bearer mytoken"
 # pastebin_field = "txt"
+# reply_style = "ping"
 
 # ==============================================================================
 # General settings
@@ -115,3 +116,14 @@ max_lines = 20
 # Override the form field name for custom pastebin services (optional).
 # Known services (txt.t0.vc, kmi.aeza.net) use their own field names automatically.
 # pastebin_field = "txt"
+
+# How XMPP replies are rendered on IRC when an XMPP user replies to a message.
+#
+# "quote" (default): include a truncated excerpt of the original message:
+#   (re nick: "original message text") reply text
+# "ping": mention the replied-to nick only, no excerpt:
+#   nick: reply text
+#
+# The excerpt is sourced from an in-memory cache (up to 500 messages). Cache
+# misses (e.g. after a restart) fall back to "ping" style automatically.
+reply_style = "quote"

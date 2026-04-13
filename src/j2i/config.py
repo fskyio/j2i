@@ -41,6 +41,8 @@ class BridgeMapping:
     pastebin: str | None = None
     pastebin_auth: str | None = None
     pastebin_field: str | None = None
+    # Reply style: "quote" (inline excerpt) or "ping" (nick mention only)
+    reply_style: str | None = None
 
 
 @dataclass
@@ -50,6 +52,8 @@ class Settings:
     pastebin: str | None = None
     pastebin_auth: str | None = None
     pastebin_field: str | None = None
+    # Reply style: "quote" (inline excerpt) or "ping" (nick mention only)
+    reply_style: str = "quote"
 
 
 @dataclass
