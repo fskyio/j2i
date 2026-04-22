@@ -16,28 +16,69 @@ A bridge between XMPP MUCs and IRC channels. Supports both basic plumbing (bot r
 ## Requirements
 
 - Python 3.11+
-- [uv](https://docs.astral.sh/uv/)
+- slixmpp
 
-## Setup
+## Installation
+
+### pip/pipx (PyPI)
+
+You can install j2i from PyPI with pip:
+
+```sh
+pip install j2i
+```
+
+Or with pipx for an isolated environment:
+
+```sh
+pipx install j2i
+```
+
+### pip/pipx (FSKY Foundry)
+
+To download the package from FSKY Foundry instead of PyPI:
+
+```sh
+pip install j2i --pip-args="--index-url https://foundry.fsky.io/api/packages/telepath/pypi/simple --extra-index-url https://pypi.org/simple"
+```
+
+Or with pipx:
+
+```sh
+pipx install j2i --pip-args="--index-url https://foundry.fsky.io/api/packages/telepath/pypi/simple --extra-index-url https://pypi.org/simple"
+```
+
+### From wheel
+
+Download the wheel from the [releases page](https://foundry.fsky.io/telepath/j2i/releases) and install with pip:
+
+```sh
+pip install j2i-*.whl
+```
+
+## Running
+
+### Installed package
+
+After installing, simply run:
+
+```sh
+j2i -c config.toml
+```
+
+### Local development
+
+Requires [uv](https://docs.astral.sh/uv/):
 
 ```sh
 git clone https://foundry.fsky.io/telepath/j2i.git
 cd j2i
 cp config.example.toml config.toml
 $EDITOR config.toml
-uv run j2i
+uv run j2i -c config.toml
 ```
 
-By default, `j2i` looks for `config.toml` in the current directory. Use `-c` to specify a different path.
-
-```
-j2i [-c config.toml] [-v]
-
-  -c, --config    Path to config file (default: config.toml)
-  -v, --verbose   Enable debug logging
-```
-
-## Docker/Podman
+### Docker/Podman
 
 The image expects the config file at `/config/config.toml`.
 
