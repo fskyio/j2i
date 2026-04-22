@@ -25,5 +25,13 @@ COPY --from=builder /app/src /app/src
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Image metadata
+LABEL org.opencontainers.image.title="j2i" \
+      org.opencontainers.image.description="Open source bridge software that connects XMPP and IRC channels" \
+      org.opencontainers.image.authors="Telepath" \
+      org.opencontainers.image.url="https://telepath.im/projects/j2i/" \
+      org.opencontainers.image.source="https://foundry.fsky.io/telepath/j2i" \
+      org.opencontainers.image.licenses="Unlicense"
+
 ENTRYPOINT ["j2i"]
 CMD ["-c", "/config/config.toml"]
