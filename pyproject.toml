@@ -3,13 +3,37 @@ name = "j2i"
 version = "1.0.0"
 description = "Open source bridge software that connects XMPP and IRC channels"
 readme = "README.md"
+license = "Unlicense"
+license-files = ["LICENSE"]
 authors = [
     { name = "Telepath", email = "development@telepath.im" }
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: No Input/Output (Daemon)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Communications",
+    "Topic :: Communications :: Chat",
+    "Topic :: Communications :: Chat :: Internet Relay Chat",
+    "Topic :: Internet :: XMPP",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators"
 ]
 requires-python = ">=3.11"
 dependencies = [
     "slixmpp>=1.8.0",
 ]
+
+[project.urls]
+Homepage = "https://telepath.im/projects/j2i/"
+Repository = "https://foundry.fsky.io/telepath/j2i.git"
+Issues = "https://foundry.fsky.io/telepath/j2i/issues"
 
 [project.scripts]
 j2i = "j2i.__main__:main"
