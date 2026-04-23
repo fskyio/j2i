@@ -4,7 +4,6 @@ version = "1.0.0"
 description = "Open source bridge software that connects XMPP and IRC channels"
 readme = "README.md"
 license = "Unlicense"
-license-files = ["LICENSE"]
 authors = [
     { name = "Telepath", email = "development@telepath.im" }
 ]
