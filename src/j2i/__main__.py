@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 
 from j2i.config import load_config
@@ -38,16 +39,23 @@ def main() -> None:
         sys.exit(1)
 
     bridge = Bridge(config)
-    try:
-        asyncio.run(_run(bridge))
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(_run(bridge))
 
 
 async def _run(bridge: Bridge) -> None:
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    def _on_signal() -> None:
+        if not stop_event.is_set():
+            bridge.stop()
+            stop_event.set()
+
+    loop.add_signal_handler(signal.SIGINT, _on_signal)
+    loop.add_signal_handler(signal.SIGTERM, _on_signal)
+
     await bridge.start()
-    # Keep running until cancelled
-    await asyncio.Event().wait()
+    await stop_event.wait()
 
 
 if __name__ == "__main__":

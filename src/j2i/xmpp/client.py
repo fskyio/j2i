@@ -45,6 +45,7 @@ class XMPPClient:
         self.on_typing: TypingCallback | None = None
         self._mucs: list[str] = []
         self._connected = asyncio.Event()
+        self._stopping = False
 
         self._xmpp = slixmpp.ClientXMPP(jid, password)
         self._xmpp.register_plugin("xep_0045")   # MUC
@@ -130,6 +131,8 @@ class XMPPClient:
         self._connected.set()
 
     async def _on_disconnected(self, _event: dict) -> None:
+        if self._stopping:
+            return
         log.warning("XMPP disconnected, reconnecting...")
         self._connected.clear()
         await asyncio.sleep(2)
@@ -243,6 +246,10 @@ class XMPPClient:
         if el is not None:
             return el.get("id")
         return None
+
+    def stop(self) -> None:
+        self._stopping = True
+        self._xmpp.disconnect()
 
     async def disconnect(self) -> None:
         self._xmpp.disconnect()

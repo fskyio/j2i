@@ -104,6 +104,8 @@ class Bridge:
         # Temp: XMPP client_id → body (until stanza-id is known)
         self._pending_body: dict[str, str] = {}
 
+        self._stopping: bool = False
+
     def _setting(self, b: BridgeMapping, name: str):
         """Resolve a setting: per-bridge override if set, else global."""
         val = getattr(b, name, None)
@@ -116,6 +118,11 @@ class Bridge:
         self._body_cache[stanza_id] = body
         if len(self._body_cache) > _NICK_MAP_SIZE:
             self._body_cache.popitem(last=False)
+
+    def stop(self) -> None:
+        self._stopping = True
+        for client in self.xmpp_clients.values():
+            client.stop()
 
     async def start(self) -> None:
         self._build_clients()
@@ -224,12 +231,16 @@ class Bridge:
             log.info("Joined IRC channel: %s on %s", ch, name)
 
     async def _reconnect_irc(self, name: str, client: IRCClient) -> None:
+        if self._stopping:
+            return
         delay = _RECONNECT_BASE
         while True:
             log.info(
                 "Reconnecting to IRC %s in %d seconds...", name, delay
             )
             await asyncio.sleep(delay)
+            if self._stopping:
+                return
             try:
                 await self._do_connect_irc(name, client)
                 log.info("Reconnected to IRC %s", name)

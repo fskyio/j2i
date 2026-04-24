@@ -49,6 +49,7 @@ class XMPPComponent:
         self._mucs: list[str] = []
         self._connected = asyncio.Event()
         self._reconnecting = False
+        self._stopping = False
 
         # muc_jid.lower() -> {puppet_jid -> actual_muc_nick}
         # The actual nick may differ from the IRC nick after a collision.
@@ -296,6 +297,8 @@ class XMPPComponent:
             asyncio.ensure_future(self.on_reconnected())
 
     async def _on_disconnected(self, _event: dict) -> None:
+        if self._stopping:
+            return
         log.warning("XMPP component disconnected, reconnecting...")
         self._connected.clear()
         self._puppet_nicks.clear()
@@ -502,6 +505,10 @@ class XMPPComponent:
             return
         if self.on_typing:
             await self.on_typing(muc_jid, nick, False)
+
+    def stop(self) -> None:
+        self._stopping = True
+        self._xmpp.disconnect()
 
     async def disconnect(self) -> None:
         self._xmpp.disconnect()
