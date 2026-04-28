@@ -45,6 +45,56 @@ def sanitize_irc_nick(nick: str) -> str:
     return sanitized or "unknown"
 
 
+def format_irc_to_xmpp(text: str) -> str:
+    """Convert basic IRC formatting to XMPP markdown (XEP-0393) and strip the rest."""
+    text = re.sub(r'\x03(?:\d{1,2}(?:,\d{1,2})?)?', '', text)
+    text = re.sub(r'\x04[0-9a-fA-F]{0,6}', '', text)
+    text = re.sub(r'\x08', '', text)
+    
+    out = []
+    bold = False
+    italic = False
+    strike = False
+    mono = False
+
+    def reset() -> str:
+        nonlocal bold, italic, strike, mono
+        res = ""
+        if mono:
+            res += "`"; mono = False
+        if strike:
+            res += "~"; strike = False
+        if italic:
+            res += "_"; italic = False
+        if bold:
+            res += "*"; bold = False
+        return res
+
+    for char in text:
+        if char == '\x02':
+            out.append('*')
+            bold = not bold
+        elif char == '\x1d':
+            out.append('_')
+            italic = not italic
+        elif char == '\x1e':
+            out.append('~')
+            strike = not strike
+        elif char == '\x11':
+            out.append('`')
+            mono = not mono
+        elif char == '\x0f':
+            out.append(reset())
+        elif char in ('\x16', '\x1f'):
+            pass
+        else:
+            out.append(char)
+            
+    out.append(reset())
+    res = "".join(out)
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', res)
+
+
 def _puppet_jid(nick: str, irc_name: str, component_domain: str) -> str:
     """Build the puppet JID for an IRC user under a component domain."""
     localpart = f"{sanitize_irc_nick(nick).lower()}.{irc_name}"
@@ -298,6 +348,7 @@ class Bridge:
     def _make_irc_message_handler(self, irc_name: str):
         async def handler(irc_msg: IRCMessage) -> None:
             channel, nick, text = irc_msg.channel, irc_msg.nick, irc_msg.text
+            text = format_irc_to_xmpp(text)
             key = (irc_name, channel.lower())
             bridges = self._irc_to_bridges.get(key, [])
             for b in bridges:
@@ -365,6 +416,7 @@ class Bridge:
     def _make_irc_action_handler(self, irc_name: str):
         async def handler(irc_msg: IRCMessage) -> None:
             channel, nick, text = irc_msg.channel, irc_msg.nick, irc_msg.text
+            text = format_irc_to_xmpp(text)
             key = (irc_name, channel.lower())
             bridges = self._irc_to_bridges.get(key, [])
             for b in bridges:
