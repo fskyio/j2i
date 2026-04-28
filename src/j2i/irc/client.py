@@ -36,6 +36,18 @@ SelfMsgCallback = Callable[[str, str], Awaitable[None]]  # channel, msgid
 
 
 @dataclass
+class _InboundBatch:
+    """State for an in-progress server-to-client batch."""
+    batch_type: str
+    target: str
+    nick: str = ""
+    msgid: str | None = None
+    reply_to_msgid: str | None = None
+    # (text, concat) tuples, where concat=True means no separator before this line
+    lines: list[tuple[str, bool]] = field(default_factory=list)
+
+
+@dataclass
 class IRCClient:
     host: str
     port: int
@@ -49,12 +61,22 @@ class IRCClient:
     relaymsg_separator: str = "/"
     has_message_tags: bool = False
     has_echo_message: bool = False
+    has_batch: bool = False
+    has_multiline: bool = False
+    multiline_max_bytes: int = 0
+    multiline_max_lines: int = 0
     _has_sasl: bool = field(default=False, repr=False)
     _sasl_started: bool = field(default=False, repr=False)
     _sasl_done: bool = field(default=False, repr=False)
     # Accumulate caps across multi-line CAP LS before sending REQ
     _pending_caps: list[str] = field(default_factory=list, repr=False)
     _cap_ls_done: bool = field(default=False, repr=False)
+    # Active inbound batches keyed by ref
+    _inbound_batches: dict[str, "_InboundBatch"] = field(
+        default_factory=dict, repr=False,
+    )
+    # Counter for outbound batch refs
+    _batch_counter: int = field(default=0, repr=False)
 
     # Channels the client has joined and whether it has +o in each
     channels: dict[str, bool] = field(default_factory=dict)  # channel -> is_op
@@ -91,6 +113,10 @@ class IRCClient:
         self.has_relaymsg = False
         self.has_message_tags = False
         self.has_echo_message = False
+        self.has_batch = False
+        self.has_multiline = False
+        self.multiline_max_bytes = 0
+        self.multiline_max_lines = 0
         self._has_sasl = False
         self._sasl_started = False
         self._sasl_done = False
@@ -99,6 +125,8 @@ class IRCClient:
         self.channels.clear()
         self._channel_members.clear()
         self._pending_names.clear()
+        self._inbound_batches.clear()
+        self._batch_counter = 0
 
         ssl_ctx = None
         if self.tls:
@@ -173,6 +201,38 @@ class IRCClient:
 
     def can_relaymsg(self, channel: str) -> bool:
         return self.has_relaymsg and self.channels.get(channel.lower(), False)
+
+    def can_multiline(self, lines: list[str]) -> bool:
+        """Return True if the given lines fit the negotiated multiline limits."""
+        if not (self.has_multiline and self.has_batch and self.has_message_tags):
+            return False
+        if len(lines) < 2:
+            return False
+        if self.multiline_max_lines and len(lines) > self.multiline_max_lines:
+            return False
+        if self.multiline_max_bytes:
+            # \n separators between lines also count toward max-bytes
+            total = sum(len(l.encode("utf-8")) for l in lines) + max(0, len(lines) - 1)
+            if total > self.multiline_max_bytes:
+                return False
+        return True
+
+    async def send_multiline_message(
+        self, channel: str, lines: list[str], reply_to: str | None = None,
+    ) -> None:
+        """Send a multi-line message wrapped in a draft/multiline BATCH.
+
+        Caller must have verified can_multiline(lines) first.
+        """
+        self._batch_counter += 1
+        ref = f"j2i{self._batch_counter}"
+        batch_tags = (
+            f"@+draft/reply={reply_to} " if reply_to and self.has_message_tags else ""
+        )
+        await self._send(f"{batch_tags}BATCH +{ref} draft/multiline {channel}")
+        for line in lines:
+            await self._send(f"@batch={ref} PRIVMSG {channel} :{line}")
+        await self._send(f"BATCH -{ref}")
 
     async def send_typing(self, channel: str, active: bool) -> None:
         if not self.has_message_tags:
@@ -290,6 +350,9 @@ class IRCClient:
 
         elif command == "TAGMSG":
             await self._handle_tagmsg(tags, prefix, params)
+
+        elif command == "BATCH":
+            await self._handle_batch(tags, prefix, params)
 
     async def _handle_join(self, prefix: str, params: list[str]) -> None:
         if not params:
@@ -435,6 +498,29 @@ class IRCClient:
                     self.has_echo_message = True
                     self._pending_caps.append(cap_name)
                     log.info("echo-message supported")
+                elif cap_name == "batch":
+                    self.has_batch = True
+                    self._pending_caps.append(cap_name)
+                    log.info("batch supported")
+                elif cap_name in ("draft/multiline", "multiline"):
+                    self.has_multiline = True
+                    if "=" in cap:
+                        for kv in cap.split("=", 1)[1].split(","):
+                            if "=" not in kv:
+                                continue
+                            k, v = kv.split("=", 1)
+                            try:
+                                if k == "max-bytes":
+                                    self.multiline_max_bytes = int(v)
+                                elif k == "max-lines":
+                                    self.multiline_max_lines = int(v)
+                            except ValueError:
+                                pass
+                    self._pending_caps.append(cap_name)
+                    log.info(
+                        "multiline supported (max-bytes=%d, max-lines=%d)",
+                        self.multiline_max_bytes, self.multiline_max_lines,
+                    )
                 elif cap_name == "away-notify":
                     self._pending_caps.append(cap_name)
                     log.info("away-notify supported")
@@ -518,6 +604,18 @@ class IRCClient:
         text = params[1]
         nick = prefix.split("!")[0] if "!" in prefix else prefix
 
+        # If this PRIVMSG is part of an active multiline batch, accumulate
+        # it and defer dispatch until the batch closes.
+        batch_ref = tags.get("batch")
+        if batch_ref and batch_ref in self._inbound_batches:
+            batch = self._inbound_batches[batch_ref]
+            if batch.batch_type in ("draft/multiline", "multiline"):
+                if not batch.nick:
+                    batch.nick = nick
+                concat = "draft/multiline-concat" in tags or "multiline-concat" in tags
+                batch.lines.append((text, concat))
+                return
+
         if not target.startswith(("#", "&")):
             return
 
@@ -552,6 +650,67 @@ class IRCClient:
             irc_msg = IRCMessage(
                 channel=target, nick=nick, text=text,
                 msgid=msgid, reply_to_msgid=reply_to_msgid,
+            )
+            await self.on_message(irc_msg)
+
+    async def _handle_batch(
+        self, tags: dict[str, str], prefix: str, params: list[str]
+    ) -> None:
+        if not params:
+            return
+        ref_token = params[0]
+        if not ref_token or ref_token[0] not in "+-":
+            return
+        sign, ref = ref_token[0], ref_token[1:]
+
+        if sign == "+":
+            if len(params) < 2:
+                return
+            batch_type = params[1]
+            target = params[2] if len(params) >= 3 else ""
+            self._inbound_batches[ref] = _InboundBatch(
+                batch_type=batch_type,
+                target=target,
+                msgid=tags.get("msgid") or None,
+                reply_to_msgid=tags.get("+draft/reply") or None,
+            )
+            return
+
+        # sign == "-": close the batch and dispatch combined message
+        batch = self._inbound_batches.pop(ref, None)
+        if batch is None:
+            return
+        if batch.batch_type not in ("draft/multiline", "multiline"):
+            return
+        if not batch.lines or not batch.target.startswith(("#", "&")):
+            return
+
+        # Re-assemble lines: \n separator unless line carries the concat tag
+        parts: list[str] = []
+        for i, (line_text, concat) in enumerate(batch.lines):
+            if i > 0 and not concat:
+                parts.append("\n")
+            parts.append(line_text)
+        text = "".join(parts)
+
+        nick = batch.nick
+        if not nick:
+            return
+
+        is_self = nick == self.nick
+        if not is_self and self.has_relaymsg and self.relaymsg_separator in nick:
+            suffix = nick.split(self.relaymsg_separator)[-1]
+            if suffix == "xmpp":
+                is_self = True
+        if is_self:
+            if batch.msgid and self.on_self_message:
+                await self.on_self_message(batch.target, batch.msgid)
+            return
+
+        if self.on_message:
+            irc_msg = IRCMessage(
+                channel=batch.target, nick=nick, text=text,
+                msgid=batch.msgid, reply_to_msgid=batch.reply_to_msgid,
             )
             await self.on_message(irc_msg)
 

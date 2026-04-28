@@ -715,9 +715,29 @@ class Bridge:
         if max_lines > 0:
             lines = lines[:max_lines]
 
-        for i, line in enumerate(lines):
-            if not line.strip():
-                continue
+        # Drop blank lines — IRC PRIVMSG bodies cannot be empty, and the
+        # plumbing format already conveys structure line-by-line.
+        non_blank = [line for line in lines if line.strip()]
+
+        # Try a single multiline BATCH for the plain PRIVMSG path. Ergo
+        # rejects RELAYMSG inside a multiline batch with MULTILINE_INVALID,
+        # so we keep RELAYMSG strictly per-line.
+        use_relaymsg = irc_cfg.relaymsg and irc_client.can_relaymsg(channel)
+        if not use_relaymsg and len(non_blank) > 1:
+            display_nick = (
+                anti_ping(msg.nick)
+                if self._setting(b, "anti_ping")
+                else msg.nick
+            )
+            first_prefix = f"<{display_nick}> {reply_prefix}"
+            batch_lines = [first_prefix + non_blank[0]] + non_blank[1:]
+            if irc_client.can_multiline(batch_lines):
+                await irc_client.send_multiline_message(
+                    channel, batch_lines, reply_to=irc_reply_to,
+                )
+                return
+
+        for i, line in enumerate(non_blank):
             # Only prepend reply prefix and native reply tag to the first line
             prefix = reply_prefix if i == 0 else ""
             reply_tag = irc_reply_to if i == 0 else None

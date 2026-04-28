@@ -10,6 +10,7 @@ A bridge between XMPP MUCs and IRC channels. Supports both basic plumbing (bot r
 - **Message edits** - XEP-0308 corrections are relayed to IRC as `* corrected text`
 - **Pastebin** - messages exceeding a configurable line limit are uploaded to a pastebin and linked instead of flooding
 - **Typing indicators** - XEP-0085 (XMPP) ↔ IRCv3 typing tag
+- **Multiline messages** - IRCv3 [draft/multiline](https://ircv3.net/specs/extensions/multiline) batches are joined into a single XMPP message; multi-line XMPP messages are sent to IRC as one batch when supported, with per-line fallback otherwise
 - **Anti-ping** - zero-width space inserted into relayed nicks to avoid unwanted highlights
 - **Multiple networks** - bridge as many XMPP/IRC connections and channel pairs as you want, each configured independently
 
