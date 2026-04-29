@@ -18,7 +18,7 @@ class IRCMessage:
     is_action: bool = False
     # IRCv3 message-ids
     msgid: str | None = None
-    # IRCv3 +draft/reply client tag
+    # IRCv3 +reply client tag
     reply_to_msgid: str | None = None
 
 
@@ -192,7 +192,7 @@ class IRCClient:
     async def send_message(
         self, channel: str, text: str, reply_to: str | None = None
     ) -> None:
-        tag_prefix = f"@+draft/reply={reply_to} " if reply_to and self.has_message_tags else ""
+        tag_prefix = f"@+reply={reply_to} " if reply_to and self.has_message_tags else ""
         await self._send(f"{tag_prefix}PRIVMSG {channel} :{text}")
 
     async def send_action(self, channel: str, text: str) -> None:
@@ -203,7 +203,7 @@ class IRCClient:
         reply_to: str | None = None,
     ) -> None:
         nick = f"{spoofed_nick}{self.relaymsg_separator}xmpp"
-        tag_prefix = f"@+draft/reply={reply_to} " if reply_to and self.has_message_tags else ""
+        tag_prefix = f"@+reply={reply_to} " if reply_to and self.has_message_tags else ""
         await self._send(f"{tag_prefix}RELAYMSG {channel} {nick} :{text}")
 
     def can_relaymsg(self, channel: str) -> bool:
@@ -234,7 +234,7 @@ class IRCClient:
         self._batch_counter += 1
         ref = f"j2i{self._batch_counter}"
         batch_tags = (
-            f"@+draft/reply={reply_to} " if reply_to and self.has_message_tags else ""
+            f"@+reply={reply_to} " if reply_to and self.has_message_tags else ""
         )
         await self._send(f"{batch_tags}BATCH +{ref} draft/multiline {channel}")
         for line in lines:
@@ -660,7 +660,7 @@ class IRCClient:
             return
 
         msgid = tags.get("msgid") or None
-        reply_to_msgid = tags.get("+draft/reply") or None
+        reply_to_msgid = tags.get("+reply") or None
 
         # CTCP ACTION (/me)
         if text.startswith("\x01ACTION ") and text.endswith("\x01"):
@@ -699,7 +699,7 @@ class IRCClient:
                 batch_type=batch_type,
                 target=target,
                 msgid=tags.get("msgid") or None,
-                reply_to_msgid=tags.get("+draft/reply") or None,
+                reply_to_msgid=tags.get("+reply") or None,
             )
             return
 
@@ -763,5 +763,5 @@ class IRCClient:
         unreact_value = tags.get("+draft/unreact", "")
         if (react_value or unreact_value) and self.on_reaction:
             emoji = react_value or unreact_value
-            reply_to = tags.get("+draft/reply") or None
+            reply_to = tags.get("+reply") or None
             await self.on_reaction(target, nick, emoji, reply_to, bool(unreact_value))
