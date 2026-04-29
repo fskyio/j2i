@@ -6,7 +6,8 @@ A bridge between XMPP MUCs and IRC channels. Supports both basic plumbing (bot r
 
 - **Basic plumbing mode** - bridge bot relays messages in `<nick> text` format, works with any XMPP and IRC server
 - **Puppeteering** - XMPP users appear on IRC with their real nick via [RELAYMSG](https://raw.githubusercontent.com/ircv3/ircv3-specifications/66233655658dce029fc2a5184a0ab97201a4ceec/extensions/relaymsg.md); IRC users appear in XMPP MUCs as puppet JIDs via [XEP-0114 component](https://xmpp.org/extensions/xep-0114.html)
-- **Smart replies** - XEP-0461 replies from XMPP become `nick: ` mentions on IRC; IRCv3 reply tags are preserved in the other direction
+- **Smart replies** - XEP-0461 replies from XMPP become `nick: ` mentions or quoted on IRC; IRCv3 reply tags are preserved
+- **Reactions** - XMPP reactions (XEP-0444) are relayed to IRC as attributed text; IRC `+draft/react`/`+draft/unreact` tags are bridged natively to XMPP reactions
 - **Message edits** - XEP-0308 corrections are relayed to IRC as `* corrected text`
 - **Pastebin** - messages exceeding a configurable line limit are uploaded to a pastebin and linked instead of flooding
 - **Typing indicators** - XEP-0085 (XMPP) ↔ IRCv3 typing tag
