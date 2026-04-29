@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] - 2026-04-29
 
 ### Added
 - Native IRCv3 multiline support for relaying multi-line content
@@ -17,6 +17,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 ### Changed
 - XMPP resource name is now `j2i <version>` instead of the slixmpp default
 - XMPP entity capabilities identity and caps node now identify the client as `j2i` rather than slixmpp
+- Switched from +draft/reply to +reply for the reply tag
 
 ## [1.0.1] - 2026-04-24
 
