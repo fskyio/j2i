@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from importlib.metadata import version as _pkg_version
 from typing import Callable, Awaitable
 
 import slixmpp
@@ -48,11 +49,24 @@ class XMPPClient:
         self._stopping = False
 
         self._xmpp = slixmpp.ClientXMPP(jid, password)
+        try:
+            _ver = _pkg_version("j2i")
+            self._xmpp.requested_jid.resource = f"j2i {_ver}"
+        except Exception:
+            _ver = ""
+            self._xmpp.requested_jid.resource = "j2i"
         self._xmpp.register_plugin("xep_0045")   # MUC
         self._xmpp.register_plugin("xep_0085")   # Chat State Notifications
         self._xmpp.register_plugin("xep_0199")   # Ping
         self._xmpp.register_plugin("xep_0308")   # Last Message Correction
         self._xmpp.register_plugin("xep_0461")   # Message Replies
+        # xep_0045 pulls in xep_0115 (Entity Capabilities) transitively;
+        # override slixmpp defaults so clients see "j2i" not "Slixmpp x.y.z"
+        self._xmpp["xep_0115"].caps_node = "https://telepath.im/projects/j2i"
+        self._xmpp["xep_0030"].add_identity(
+            category="client", itype="bot",
+            name=f"j2i {_ver}".strip() if _ver else "j2i",
+        )
 
         self._xmpp.add_event_handler("session_start", self._on_session_start)
         self._xmpp.add_event_handler("disconnected", self._on_disconnected)

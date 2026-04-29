@@ -65,6 +65,9 @@ class IRCClient:
     has_multiline: bool = False
     multiline_max_bytes: int = 0
     multiline_max_lines: int = 0
+    # ISUPPORT tokens
+    has_utf8only: bool = False
+    bot_mode_char: str | None = None
     _has_sasl: bool = field(default=False, repr=False)
     _sasl_started: bool = field(default=False, repr=False)
     _sasl_done: bool = field(default=False, repr=False)
@@ -117,6 +120,8 @@ class IRCClient:
         self.has_multiline = False
         self.multiline_max_bytes = 0
         self.multiline_max_lines = 0
+        self.has_utf8only = False
+        self.bot_mode_char = None
         self._has_sasl = False
         self._sasl_started = False
         self._sasl_done = False
@@ -308,6 +313,9 @@ class IRCClient:
             self._sasl_done = True
             await self._send("CAP END")
 
+        elif command == "005":
+            await self._handle_isupport(params)
+
         elif command == "001":
             # RPL_WELCOME - registration complete
             self._registered = True
@@ -462,6 +470,23 @@ class IRCClient:
         ]
         if channels and self.on_user_away:
             await self.on_user_away(nick, channels, reason)
+
+    async def _handle_isupport(self, params: list[str]) -> None:
+        # params: [our_nick, token1, token2, ..., ":are supported by this server"]
+        for token in params[1:-1]:
+            if "=" in token:
+                key, value = token.split("=", 1)
+            else:
+                key, value = token, ""
+            key = key.upper()
+            if key == "UTF8ONLY":
+                self.has_utf8only = True
+                log.info("Server is UTF8ONLY")
+            elif key == "BOT":
+                self.bot_mode_char = value if value else "B"
+                log.info("Server supports bot mode (mode char: %s)", self.bot_mode_char)
+                if self._registered:
+                    await self._send(f"MODE {self.nick} +{self.bot_mode_char}")
 
     async def _handle_cap(self, params: list[str]) -> None:
         if len(params) < 3:
