@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from importlib.metadata import version as _pkg_version
 from typing import Callable, Awaitable
+from xml.etree.ElementTree import SubElement
 
 import slixmpp
 
@@ -31,6 +32,11 @@ MessageCallback = Callable[[XMPPMessage], Awaitable[None]]
 SelfMessageCallback = Callable[[str, str], Awaitable[None]]
 # Typing: (muc_jid, nick, is_typing)
 TypingCallback = Callable[[str, str, bool], Awaitable[None]]
+# Reactions: (muc_jid, nick, stanza_id_ref, emojis)
+ReactionCallback = Callable[[str, str, str, "frozenset[str]"], Awaitable[None]]
+
+_NS_REACTIONS = "urn:xmpp:reactions:0"
+_NS_HINTS = "urn:xmpp:hints"
 
 
 class XMPPClient:
@@ -44,6 +50,7 @@ class XMPPClient:
         self.on_message: MessageCallback | None = None
         self.on_self_message: SelfMessageCallback | None = None
         self.on_typing: TypingCallback | None = None
+        self.on_reaction: ReactionCallback | None = None
         self._mucs: list[str] = []
         self._connected = asyncio.Event()
         self._stopping = False
@@ -59,6 +66,7 @@ class XMPPClient:
         self._xmpp.register_plugin("xep_0085")   # Chat State Notifications
         self._xmpp.register_plugin("xep_0199")   # Ping
         self._xmpp.register_plugin("xep_0308")   # Last Message Correction
+        self._xmpp.register_plugin("xep_0444")   # Message Reactions
         self._xmpp.register_plugin("xep_0461")   # Message Replies
         # xep_0045 pulls in xep_0115 (Entity Capabilities) transitively;
         # override slixmpp defaults so clients see "j2i" not "Slixmpp x.y.z"
@@ -85,6 +93,7 @@ class XMPPClient:
         self._xmpp.add_event_handler(
             "chatstate_active", self._on_chatstate_done
         )
+        self._xmpp.add_event_handler("reactions", self._on_reactions)
 
     async def connect(self) -> None:
         self._xmpp.connect()
@@ -121,6 +130,18 @@ class XMPPClient:
         msg_id = msg["id"]
         msg.send()
         return msg_id
+
+    async def send_reaction(
+        self, muc_jid: str, stanza_id_ref: str, emojis: frozenset[str]
+    ) -> None:
+        """Send an XEP-0444 reaction stanza to a MUC. Empty emojis = remove all."""
+        msg = self._xmpp.make_message(mto=muc_jid, mtype="groupchat")
+        reactions_el = SubElement(msg.xml, f"{{{_NS_REACTIONS}}}reactions")
+        reactions_el.set("id", stanza_id_ref)
+        for emoji in sorted(emojis):
+            SubElement(reactions_el, f"{{{_NS_REACTIONS}}}reaction").text = emoji
+        SubElement(msg.xml, f"{{{_NS_HINTS}}}store")
+        msg.send()
 
     async def send_typing(self, muc_jid: str, composing: bool) -> None:
         msg = self._xmpp.make_message(
@@ -233,6 +254,23 @@ class XMPPClient:
 
         if self.on_message:
             await self.on_message(xmpp_msg)
+
+    async def _on_reactions(self, msg: slixmpp.Message) -> None:
+        """slixmpp xep_0444 fires a dedicated 'reactions' event for reaction stanzas."""
+        if msg["type"] != "groupchat":
+            return
+        nick = msg["mucnick"]
+        if nick == self.nick:
+            return
+        if not self.on_reaction:
+            return
+        muc_jid = str(msg["from"].bare)
+        reactions = msg["reactions"]
+        ref = reactions["id"]
+        if not ref:
+            return
+        emojis = frozenset(reactions.get_values(all_chars=True))
+        await self.on_reaction(muc_jid, nick, ref, emojis)
 
     async def _on_chatstate_composing(self, msg: slixmpp.Message) -> None:
         if msg["type"] != "groupchat":

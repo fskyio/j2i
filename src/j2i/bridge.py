@@ -145,6 +145,18 @@ class Bridge:
             collections.OrderedDict()
         )
 
+        # Reaction state for IRC → XMPP: irc_msgid → {nick: current emoji set}
+        # Keyed by the IRC msgid of the message being reacted to.
+        self._irc_reaction_state: collections.OrderedDict[
+            str, dict[str, set[str]]
+        ] = collections.OrderedDict()
+
+        # Reaction state for XMPP → IRC: xmpp_sid → {nick: previous emoji frozenset}
+        # Tracks what was last sent so we can compute added/removed deltas.
+        self._xmpp_reaction_state: collections.OrderedDict[
+            str, dict[str, frozenset[str]]
+        ] = collections.OrderedDict()
+
         # Body cache for inline reply excerpts: XMPP stanza-id → message body.
         # Populated for both XMPP messages (on receipt) and IRC messages (once
         # the echo maps client_id → stanza-id in _on_xmpp_self_message).
@@ -228,6 +240,7 @@ class Bridge:
             client.on_user_away = self._make_irc_away_handler(irc_name)
             client.on_self_kicked = self._make_irc_self_kicked_handler(irc_name, client)
             client.on_self_message = self._make_irc_self_msg_handler(irc_name)
+            client.on_reaction = self._make_irc_reaction_handler(irc_name)
             # Presence callbacks for component-backed bridges
             client.on_user_join = self._make_irc_join_handler(irc_name)
             client.on_user_part = self._make_irc_part_handler(irc_name)
@@ -238,6 +251,7 @@ class Bridge:
         for xmpp_name, client in self.xmpp_clients.items():
             client.on_message = self._make_xmpp_handler(xmpp_name)
             client.on_self_message = self._on_xmpp_self_message
+            client.on_reaction = self._make_xmpp_reaction_handler(xmpp_name)
 
         for xmpp_name, component in self.xmpp_components.items():
             component.on_reconnected = self._make_xmpp_reconnect_handler(xmpp_name)
@@ -821,6 +835,123 @@ class Bridge:
             await irc_client.send_message(
                 channel, f"<{display_nick}> {text}", reply_to=reply_to
             )
+
+    # ---------- Reaction bridging ----------
+
+    def _make_irc_reaction_handler(self, irc_name: str):
+        async def handler(
+            channel: str,
+            nick: str,
+            emoji: str,
+            reply_to_msgid: str | None,
+            is_unreact: bool,
+        ) -> None:
+            if not reply_to_msgid:
+                return
+            key = (irc_name, channel.lower())
+            bridges = self._irc_to_bridges.get(key, [])
+            if not bridges:
+                return
+
+            # Update LRU state: irc_msgid → nick → current emoji set
+            if reply_to_msgid in self._irc_reaction_state:
+                self._irc_reaction_state.move_to_end(reply_to_msgid)
+            else:
+                if len(self._irc_reaction_state) >= _NICK_MAP_SIZE:
+                    self._irc_reaction_state.popitem(last=False)
+            nick_map = self._irc_reaction_state.setdefault(reply_to_msgid, {})
+            current = nick_map.get(nick, set())
+            if is_unreact:
+                current.discard(emoji)
+            else:
+                current.add(emoji)
+            nick_map[nick] = current
+
+            xmpp_sid = self._irc_msgid_to_xmpp_sid.get(reply_to_msgid)
+            if not xmpp_sid:
+                log.debug(
+                    "No XMPP stanza-id for IRC reaction to msgid=%s, dropping",
+                    reply_to_msgid,
+                )
+                return
+
+            for b in bridges:
+                if b.xmpp in self.xmpp_components:
+                    component = self.xmpp_components[b.xmpp]
+                    xmpp_cfg = self.config.xmpp_by_name(b.xmpp)
+                    irc_cfg = self.config.irc_by_name(irc_name)
+                    pjid = _puppet_jid(nick, irc_cfg.name, xmpp_cfg.component_domain)  # type: ignore[arg-type]
+                    await component.send_puppet_reaction(
+                        b.xmpp_muc, pjid, xmpp_sid, frozenset(current)
+                    )
+                else:
+                    xmpp_client = self.xmpp_clients[b.xmpp]
+                    await xmpp_client.send_reaction(b.xmpp_muc, xmpp_sid, frozenset(current))
+
+        return handler
+
+    def _format_reaction_text(
+        self, b: BridgeMapping, stanza_id_ref: str, emoji: str
+    ) -> str:
+        """Build an IRC text body for a bridged XMPP reaction.
+
+        With reply_style='quote' and a cache hit, returns:
+            (reacted to "excerpt") <emoji>
+        Falls back to:
+            reacted <emoji>
+        """
+        if self._setting(b, "reply_style") == "quote":
+            cached_body = self._body_cache.get(stanza_id_ref)
+            if cached_body:
+                excerpt = cached_body.replace("\n", " ").strip()
+                if len(excerpt) > _REPLY_QUOTE_MAX:
+                    excerpt = excerpt[: _REPLY_QUOTE_MAX - 1] + "…"
+                return f'(reacted to "{excerpt}") {emoji}'
+        return f"reacted {emoji}"
+
+    def _make_xmpp_reaction_handler(self, xmpp_name: str):
+        async def handler(
+            muc_jid: str,
+            nick: str,
+            stanza_id_ref: str,
+            emojis: frozenset[str],
+        ) -> None:
+            # In component mode, filter out puppet reactions
+            if xmpp_name in self.xmpp_components:
+                component = self.xmpp_components[xmpp_name]
+                if component.is_puppet_nick(muc_jid, nick):
+                    return
+
+            key = (xmpp_name, muc_jid.lower())
+            bridges = self._xmpp_to_bridges.get(key, [])
+            if not bridges:
+                return
+
+            # Compute delta vs previously bridged state for this sender
+            if stanza_id_ref in self._xmpp_reaction_state:
+                self._xmpp_reaction_state.move_to_end(stanza_id_ref)
+            else:
+                if len(self._xmpp_reaction_state) >= _NICK_MAP_SIZE:
+                    self._xmpp_reaction_state.popitem(last=False)
+            state = self._xmpp_reaction_state.setdefault(stanza_id_ref, {})
+            prev = state.get(nick, frozenset())
+            added = emojis - prev
+            state[nick] = emojis
+
+            irc_msgid = self._xmpp_sid_to_irc_msgid.get(stanza_id_ref)
+
+            for b in bridges:
+                irc_client = self.irc_clients[b.irc]
+                irc_cfg = self.config.irc_by_name(b.irc)
+
+                for emoji in added:
+                    text = self._format_reaction_text(b, stanza_id_ref, emoji)
+                    await self._send_irc_line(
+                        irc_client, irc_cfg, b.irc_channel, nick, text, b,
+                        reply_to=irc_msgid,
+                    )
+
+        return handler
 
     async def _relay_action_to_irc(
         self,

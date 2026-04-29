@@ -4,10 +4,14 @@ import asyncio
 import hashlib
 import logging
 from typing import Callable, Awaitable
+from xml.etree.ElementTree import SubElement
 
 import slixmpp
 
-from j2i.xmpp.client import XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback
+from j2i.xmpp.client import (
+    XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback,
+    ReactionCallback, _NS_REACTIONS, _NS_HINTS,
+)
 
 ReconnectedCallback = Callable[[], Awaitable[None]]
 
@@ -59,6 +63,7 @@ class XMPPComponent:
         self.on_message: MessageCallback | None = None
         self.on_self_message: SelfMessageCallback | None = None
         self.on_typing: TypingCallback | None = None
+        self.on_reaction: ReactionCallback | None = None
         self.on_reconnected: ReconnectedCallback | None = None
 
         self._xmpp = slixmpp.ComponentXMPP(
@@ -68,6 +73,7 @@ class XMPPComponent:
         self._xmpp.register_plugin("xep_0085")
         self._xmpp.register_plugin("xep_0199")
         self._xmpp.register_plugin("xep_0308")
+        self._xmpp.register_plugin("xep_0444")
         self._xmpp.register_plugin("xep_0461")
 
         self._xmpp.add_event_handler("session_start", self._on_session_start)
@@ -80,6 +86,7 @@ class XMPPComponent:
         )
         self._xmpp.add_event_handler("chatstate_paused", self._on_chatstate_done)
         self._xmpp.add_event_handler("chatstate_active", self._on_chatstate_done)
+        self._xmpp.add_event_handler("reactions", self._on_reactions)
 
         # Intercept presence errors via an input filter.  slixmpp's normal
         # event dispatch for "presence_error" is unreliable in component mode
@@ -272,6 +279,36 @@ class XMPPComponent:
             mtype="groupchat",
         )
         msg["chat_state"] = "composing" if composing else "active"
+        msg.send()
+
+    async def send_reaction(
+        self, muc_jid: str, stanza_id_ref: str, emojis: frozenset[str]
+    ) -> None:
+        """Send an XEP-0444 reaction from the master bot JID."""
+        msg = self._xmpp.make_message(
+            mto=muc_jid, mfrom=self._master_jid, mtype="groupchat"
+        )
+        reactions_el = SubElement(msg.xml, f"{{{_NS_REACTIONS}}}reactions")
+        reactions_el.set("id", stanza_id_ref)
+        for emoji in sorted(emojis):
+            SubElement(reactions_el, f"{{{_NS_REACTIONS}}}reaction").text = emoji
+        SubElement(msg.xml, f"{{{_NS_HINTS}}}store")
+        msg.send()
+
+    async def send_puppet_reaction(
+        self, muc_jid: str, puppet_jid: str, stanza_id_ref: str, emojis: frozenset[str]
+    ) -> None:
+        """Send an XEP-0444 reaction from a puppet JID."""
+        if not self._ensure_puppet_joined(muc_jid, puppet_jid):
+            return
+        msg = self._xmpp.make_message(
+            mto=muc_jid, mfrom=puppet_jid, mtype="groupchat"
+        )
+        reactions_el = SubElement(msg.xml, f"{{{_NS_REACTIONS}}}reactions")
+        reactions_el.set("id", stanza_id_ref)
+        for emoji in sorted(emojis):
+            SubElement(reactions_el, f"{{{_NS_REACTIONS}}}reaction").text = emoji
+        SubElement(msg.xml, f"{{{_NS_HINTS}}}store")
         msg.send()
 
     # ------------------------------------------------------------------
@@ -479,6 +516,26 @@ class XMPPComponent:
 
         if self.on_message:
             await self.on_message(xmpp_msg)
+
+    async def _on_reactions(self, msg: slixmpp.Message) -> None:
+        """slixmpp xep_0444 fires a dedicated 'reactions' event for reaction stanzas."""
+        if msg["type"] != "groupchat":
+            return
+        if str(msg["to"].bare) != self._master_jid:
+            return
+        nick = msg["mucnick"]
+        muc_jid = str(msg["from"].bare)
+        muc_key = muc_jid.lower()
+        if nick == self.nick or self._is_puppet_echo(muc_key, nick):
+            return
+        if not self.on_reaction:
+            return
+        reactions = msg["reactions"]
+        ref = reactions["id"]
+        if not ref:
+            return
+        emojis = frozenset(reactions.get_values(all_chars=True))
+        await self.on_reaction(muc_jid, nick, ref, emojis)
 
     async def _on_chatstate_composing(self, msg: slixmpp.Message) -> None:
         if msg["type"] != "groupchat":

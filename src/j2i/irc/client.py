@@ -33,6 +33,7 @@ NamesCallback = Callable[[str, set[str]], Awaitable[None]]  # channel, nicks
 AwayCallback = Callable[[str, list[str], str | None], Awaitable[None]]  # nick, channels, reason|None
 SelfKickedCallback = Callable[[str], Awaitable[None]]  # channel
 SelfMsgCallback = Callable[[str, str], Awaitable[None]]  # channel, msgid
+ReactCallback = Callable[[str, str, str, "str | None", bool], Awaitable[None]]  # channel, nick, emoji, reply_to_msgid, is_unreact
 
 
 @dataclass
@@ -101,6 +102,7 @@ class IRCClient:
     on_user_away: AwayCallback | None = None
     on_self_kicked: SelfKickedCallback | None = None
     on_self_message: SelfMsgCallback | None = None
+    on_reaction: ReactCallback | None = None
 
     _reader: asyncio.StreamReader | None = field(default=None, repr=False)
     _writer: asyncio.StreamWriter | None = field(default=None, repr=False)
@@ -756,3 +758,10 @@ class IRCClient:
         if typing_value and self.on_typing:
             is_typing = typing_value == "active"
             await self.on_typing(target, nick, is_typing)
+
+        react_value = tags.get("+draft/react", "")
+        unreact_value = tags.get("+draft/unreact", "")
+        if (react_value or unreact_value) and self.on_reaction:
+            emoji = react_value or unreact_value
+            reply_to = tags.get("+draft/reply") or None
+            await self.on_reaction(target, nick, emoji, reply_to, bool(unreact_value))

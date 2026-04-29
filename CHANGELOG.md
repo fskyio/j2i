@@ -10,6 +10,13 @@ and this project follows [Semantic Versioning](https://semver.org/).
 ### Added
 - Native IRCv3 multiline support for relaying multi-line content
 - IRC-to-XMPP text formatting conversion
+- IRCv3 `UTF8ONLY` ISUPPORT token detection
+- IRCv3 bot mode: sets the user mode advertised by the `BOT` ISUPPORT token on registration
+- Reaction bridging: IRC `+draft/react`/`+draft/unreact` tags bridged natively to XMPP; XMPP reactions bridged to IRC as attributed text messages with optional quoted context
+
+### Changed
+- XMPP resource name is now `j2i <version>` instead of the slixmpp default
+- XMPP entity capabilities identity and caps node now identify the client as `j2i` rather than slixmpp
 
 ## [1.0.1] - 2026-04-24
 
