@@ -41,18 +41,18 @@ pipx install j2i
 To download the package from FSKY Foundry instead of PyPI:
 
 ```sh
-pip install j2i --pip-args="--index-url https://foundry.fsky.io/api/packages/telepath/pypi/simple --extra-index-url https://pypi.org/simple"
+pip install j2i --pip-args="--index-url https://foundry.fsky.io/api/packages/fsky/pypi/simple --extra-index-url https://pypi.org/simple"
 ```
 
 Or with pipx:
 
 ```sh
-pipx install j2i --pip-args="--index-url https://foundry.fsky.io/api/packages/telepath/pypi/simple --extra-index-url https://pypi.org/simple"
+pipx install j2i --pip-args="--index-url https://foundry.fsky.io/api/packages/fsky/pypi/simple --extra-index-url https://pypi.org/simple"
 ```
 
 ### From wheel
 
-Download the wheel from the [releases page](https://foundry.fsky.io/telepath/j2i/releases) and install with pip:
+Download the wheel from the [releases page](https://foundry.fsky.io/fsky/j2i/releases) and install with pip:
 
 ```sh
 pip install j2i-*.whl
@@ -73,7 +73,7 @@ j2i -c config.toml
 Requires [uv](https://docs.astral.sh/uv/):
 
 ```sh
-git clone https://foundry.fsky.io/telepath/j2i.git
+git clone https://foundry.fsky.io/fsky/j2i.git
 cd j2i
 cp config.example.toml config.toml
 $EDITOR config.toml
@@ -85,7 +85,7 @@ uv run j2i -c config.toml
 The image expects the config file at `/config/config.toml`.
 
 ```sh
-docker run -v ./config.toml:/config/config.toml foundry.fsky.io/telepath/j2i:latest
+docker run -v ./config.toml:/config/config.toml foundry.fsky.io/fsky/j2i:latest
 ```
 
 ### Podman quadlet (systemd)

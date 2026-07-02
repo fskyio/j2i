@@ -70,7 +70,7 @@ class XMPPClient:
         self._xmpp.register_plugin("xep_0461")   # Message Replies
         # xep_0045 pulls in xep_0115 (Entity Capabilities) transitively;
         # override slixmpp defaults so clients see "j2i" not "Slixmpp x.y.z"
-        self._xmpp["xep_0115"].caps_node = "https://telepath.im/projects/j2i"
+        self._xmpp["xep_0115"].caps_node = "https://fsky.io/projects/j2i"
         self._xmpp["xep_0030"].add_identity(
             category="client", itype="bot",
             name=f"j2i {_ver}".strip() if _ver else "j2i",

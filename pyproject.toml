@@ -5,7 +5,7 @@ description = "Open source bridge software that connects XMPP and IRC channels"
 readme = "README.md"
 license = "Unlicense"
 authors = [
-    { name = "Telepath", email = "development@telepath.im" }
+    { name = "FSKY", email = "development@fsky.io" }
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -30,9 +30,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://telepath.im/projects/j2i/"
-Repository = "https://foundry.fsky.io/telepath/j2i.git"
-Issues = "https://foundry.fsky.io/telepath/j2i/issues"
+Homepage = "https://fsky.io/projects/j2i/"
+Repository = "https://foundry.fsky.io/fsky/j2i.git"
+Issues = "https://foundry.fsky.io/fsky/j2i/issues"
 
 [project.scripts]
 j2i = "j2i.__main__:main"
@@ -43,6 +43,6 @@ build-backend = "uv_build"
 
 [[tool.uv.index]]
 name = "foundry"
-url = "https://foundry.fsky.io/api/packages/telepath/pypi/simple/"
-publish-url = "https://foundry.fsky.io/api/packages/telepath/pypi/"
+url = "https://foundry.fsky.io/api/packages/fsky/pypi/simple/"
+publish-url = "https://foundry.fsky.io/api/packages/fsky/pypi/"
 explicit = true
