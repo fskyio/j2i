@@ -10,6 +10,9 @@ and this project follows [Semantic Versioning](https://semver.org/).
 ### Added
 - Test suite (pytest) covering the pure translation helpers: nick sanitizing, IRC→XMPP formatting, pastebin service resolution, and reply/reaction prefix building
 
+### Fixed
+- Redact credentials (SASL payload, NickServ `IDENTIFY` password, server `PASS`) from debug logs; the command remains visible but the secret is masked as `<redacted>`
+
 ### Changed
 - Make RELAYMSG suffix configurable
 - Refactored reply/reaction prefix formatting into pure helpers and de-duplicated the shared excerpt-truncation and RELAYMSG-suffix logic

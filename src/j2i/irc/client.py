@@ -10,6 +10,30 @@ from typing import Callable, Awaitable
 log = logging.getLogger(__name__)
 
 
+def _redact_for_log(line: str) -> str:
+    """Mask credentials in an outbound IRC line before it is logged.
+
+    Keeps the command visible (so the auth handshake is still traceable in
+    debug output) while replacing the secret payload with ``<redacted>``.
+    """
+    # SASL: "AUTHENTICATE <base64 payload>". The mechanism/handshake tokens
+    # ("PLAIN", "+", "*") carry no secret and stay visible.
+    if line.startswith("AUTHENTICATE "):
+        arg = line.split(" ", 1)[1]
+        if arg not in ("PLAIN", "+", "*"):
+            return "AUTHENTICATE <redacted>"
+        return line
+    # Server password on registration.
+    if line.startswith("PASS "):
+        return "PASS <redacted>"
+    # NickServ IDENTIFY (e.g. "PRIVMSG NickServ :IDENTIFY <password>").
+    upper = line.upper()
+    if "IDENTIFY" in upper and ("NICKSERV" in upper or "NS " in upper):
+        head, _, _ = line.partition("IDENTIFY")
+        return f"{head}IDENTIFY <redacted>"
+    return line
+
+
 @dataclass
 class IRCMessage:
     channel: str
@@ -252,7 +276,7 @@ class IRCClient:
         if self._writer is None:
             log.warning("Cannot send, not connected: %s", line)
             return
-        log.debug(">> %s", line)
+        log.debug(">> %s", _redact_for_log(line))
         self._writer.write((line + "\r\n").encode("utf-8"))
         await self._writer.drain()
 
