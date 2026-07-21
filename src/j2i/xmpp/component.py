@@ -8,6 +8,7 @@ from xml.etree.ElementTree import SubElement
 
 import slixmpp
 
+from j2i.xmpp.avatar import Avatar
 from j2i.xmpp.client import (
     XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback,
     ReactionCallback, _NS_REACTIONS, _NS_HINTS,
@@ -45,8 +46,10 @@ class XMPPComponent:
         component_host: str = "localhost",
         component_port: int = 5347,
         nick: str = "IRC Bridge",
+        avatar: Avatar | None = None,
     ) -> None:
         self.nick = nick
+        self._avatar = avatar
         self._domain = component_domain
         # The master JID that sits in every bridged MUC to receive messages
         self._master_jid = f"bridge@{component_domain}"
@@ -70,6 +73,7 @@ class XMPPComponent:
             component_domain, password, component_host, component_port
         )
         self._xmpp.register_plugin("xep_0045")
+        self._xmpp.register_plugin("xep_0054")   # vcard-temp (serves avatars)
         self._xmpp.register_plugin("xep_0085")
         self._xmpp.register_plugin("xep_0199")
         self._xmpp.register_plugin("xep_0308")
@@ -97,6 +101,12 @@ class XMPPComponent:
         # Presence object, before any handler can suppress it.
         self._xmpp.add_filter("in", self._filter_presence_errors)
 
+        # Stamp the XEP-0153 photo hash onto outgoing MUC presence.  In Phase 1
+        # only the master JID carries an avatar; Phase 2 extends _avatar_for to
+        # resolve per-puppet avatars.  Components don't get xep_0153's own
+        # presence filter for free, so we do it explicitly here.
+        self._xmpp.add_filter("out", self._stamp_avatar)
+
     async def connect(self) -> None:
         self._xmpp.connect()
         await self._connected.wait()
@@ -107,6 +117,42 @@ class XMPPComponent:
     def is_puppet_nick(self, muc_jid: str, nick: str) -> bool:
         """Return True if nick is an IRC puppet in the given MUC."""
         return nick in self._puppet_nicks.get(muc_jid.lower(), {}).values()
+
+    # ------------------------------------------------------------------
+    # Avatars (XEP-0153)
+    # ------------------------------------------------------------------
+
+    def _avatar_for(self, jid_bare: str) -> Avatar | None:
+        """Resolve the avatar for an outgoing sender JID.
+
+        Phase 1: only the master JID has an avatar.  Phase 2 will look up a
+        per-puppet avatar map keyed by puppet JID here.
+        """
+        if jid_bare == self._master_jid:
+            return self._avatar
+        return None
+
+    async def _set_vcard(self, jid_bare: str, avatar: Avatar) -> None:
+        """Store a vcard-temp carrying the avatar so xep_0054 can serve it."""
+        vcard = self._xmpp["xep_0054"].make_vcard()
+        vcard["PHOTO"]["TYPE"] = avatar.mime
+        vcard["PHOTO"]["BINVAL"] = avatar.data
+        await self._xmpp["xep_0054"].api["set_vcard"](
+            jid=slixmpp.JID(jid_bare), args=vcard
+        )
+
+    def _stamp_avatar(self, stanza: object) -> object:
+        """Outgoing filter: add the photo hash to available presence."""
+        if not isinstance(stanza, slixmpp.Presence):
+            return stanza
+        if stanza["type"] not in ("", "available"):
+            return stanza
+        avatar = self._avatar_for(str(stanza["from"].bare))
+        if avatar is None:
+            return stanza
+        if stanza.xml.find(f"{{{'vcard-temp:x:update'}}}x") is None:
+            stanza.xml.append(avatar.photo_update_element())
+        return stanza
 
     # ------------------------------------------------------------------
     # Master bot sends (used for system messages; IRC→XMPP uses puppets)
@@ -316,6 +362,11 @@ class XMPPComponent:
     # ------------------------------------------------------------------
 
     async def _on_session_start(self, _event: dict) -> None:
+        # Store the master's vCard so xep_0054 answers inbound vcard-temp gets
+        # (in component mode the plugin serves gets straight from this cache).
+        if self._avatar is not None:
+            await self._set_vcard(self._master_jid, self._avatar)
+
         muc = self._xmpp["xep_0045"]
         for room in self._mucs:
             try:

@@ -9,6 +9,8 @@ from xml.etree.ElementTree import SubElement
 
 import slixmpp
 
+from j2i.xmpp.avatar import Avatar
+
 log = logging.getLogger(__name__)
 
 
@@ -45,8 +47,10 @@ class XMPPClient:
         jid: str,
         password: str,
         nick: str = "IRC Bridge",
+        avatar: Avatar | None = None,
     ) -> None:
         self.nick = nick
+        self._avatar = avatar
         self.on_message: MessageCallback | None = None
         self.on_self_message: SelfMessageCallback | None = None
         self.on_typing: TypingCallback | None = None
@@ -63,6 +67,8 @@ class XMPPClient:
             _ver = ""
             self._xmpp.requested_jid.resource = "j2i"
         self._xmpp.register_plugin("xep_0045")   # MUC
+        self._xmpp.register_plugin("xep_0054")   # vcard-temp
+        self._xmpp.register_plugin("xep_0153")   # vCard-Based Avatars
         self._xmpp.register_plugin("xep_0085")   # Chat State Notifications
         self._xmpp.register_plugin("xep_0199")   # Ping
         self._xmpp.register_plugin("xep_0308")   # Last Message Correction
@@ -153,6 +159,18 @@ class XMPPClient:
 
     async def _on_session_start(self, _event: dict) -> None:
         await self._xmpp.get_roster()
+
+        # Publish the vCard avatar before joining: xep_0153's outgoing presence
+        # filter then stamps the photo hash onto the MUC join presence.
+        if self._avatar is not None:
+            try:
+                await self._xmpp["xep_0153"].set_avatar(
+                    avatar=self._avatar.data, mtype=self._avatar.mime
+                )
+                log.info("Published bot avatar (%s bytes)", len(self._avatar.data))
+            except Exception as e:
+                log.warning("Failed to publish bot avatar: %s", e)
+
         self._xmpp.send_presence()
 
         muc = self._xmpp.plugin["xep_0045"]

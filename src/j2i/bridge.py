@@ -8,6 +8,7 @@ import re
 from j2i.config import Config, BridgeMapping, IRCConfig
 from j2i.irc.client import IRCClient, IRCMessage
 from j2i.pastebin import upload as pastebin_upload
+from j2i.xmpp.avatar import Avatar, default_avatar_path
 from j2i.xmpp.client import XMPPClient, XMPPMessage
 from j2i.xmpp.component import XMPPComponent
 
@@ -283,6 +284,7 @@ class Bridge:
 
     def _build_clients(self) -> None:
         for xmpp_cfg in self.config.xmpp:
+            avatar = self._load_avatar(xmpp_cfg)
             if xmpp_cfg.component:
                 client: XMPPClient | XMPPComponent = XMPPComponent(
                     component_domain=xmpp_cfg.component_domain,  # type: ignore[arg-type]
@@ -290,6 +292,7 @@ class Bridge:
                     component_host=xmpp_cfg.component_host,
                     component_port=xmpp_cfg.component_port,
                     nick=xmpp_cfg.nick,
+                    avatar=avatar,
                 )
                 self.xmpp_components[xmpp_cfg.name] = client  # type: ignore[assignment]
             else:
@@ -297,6 +300,7 @@ class Bridge:
                     jid=xmpp_cfg.jid,
                     password=xmpp_cfg.password,
                     nick=xmpp_cfg.nick,
+                    avatar=avatar,
                 )
             self.xmpp_clients[xmpp_cfg.name] = client
 
@@ -315,6 +319,33 @@ class Bridge:
                 ),
             )
             self.irc_clients[irc_cfg.name] = client
+
+    def _load_avatar(self, xmpp_cfg) -> Avatar | None:
+        """Resolve and load the bot avatar for an XMPP config.
+
+        None in config -> bundled default; "" -> explicitly disabled; otherwise
+        a path or URL.  A load failure logs and returns None so a bad avatar
+        never blocks the bridge from starting.
+        """
+        source = xmpp_cfg.avatar
+        if source == "":
+            return None
+        if source is None:
+            source = default_avatar_path()
+            if source is None:
+                return None
+        try:
+            return Avatar.load(
+                source,
+                byte_cap=self.config.settings.avatar_byte_cap,
+                target_px=self.config.settings.avatar_target_px,
+            )
+        except Exception as e:
+            log.warning(
+                "Avatar for XMPP %s not loaded (%s); continuing without",
+                xmpp_cfg.name, e,
+            )
+            return None
 
     def _build_lookup_tables(self) -> None:
         for b in self.config.bridges:

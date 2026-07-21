@@ -15,6 +15,9 @@ class XMPPConfig:
     component_host: str = "localhost"
     component_port: int = 5347
     nick: str = "IRC Bridge"
+    # Bot avatar: a local file path or http(s) URL. None = use the bundled
+    # default; "" (empty string) = explicitly no avatar.
+    avatar: str | None = None
 
 
 @dataclass
@@ -65,6 +68,13 @@ class Settings:
     reply_style: str = "quote"
     # Suffix appended to spoofed nicks in RELAYMSG (e.g. spoofednick/xmpp)
     relaymsg_suffix: str = "xmpp"
+    # Avatar byte budget: the re-encoded image must fit under this so the
+    # base64 vcard-temp stanza stays under the server's max stanza size.
+    # This is the real, server-enforced limit (image dimensions are cosmetic).
+    avatar_byte_cap: int = 64 * 1024
+    # Longest-side pixel target avatars are downscaled to before encoding.
+    # XEP-0153 suggests small, square images; this is a display nicety.
+    avatar_target_px: int = 96
 
 
 @dataclass

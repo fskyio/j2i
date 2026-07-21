@@ -28,6 +28,12 @@ component = false
 # Nick used by the bridge's master JID when joining MUCs.
 nick = "IRC Bridge"
 
+# Bot avatar shown next to the bridge's nick in MUCs (XEP-0153 vCard avatar).
+# Accepts a local file path or an http(s) URL; the image is downscaled and
+# re-encoded automatically (see [settings] avatar_target_px / avatar_byte_cap).
+# Leave unset to use the bundled default avatar; set to "" to disable entirely.
+# avatar = "/etc/j2i/bot-avatar.png"
+
 # --- Component-mode example ---
 # [[xmpp]]
 # name = "mycomponent"
@@ -112,6 +118,14 @@ anti_ping = true
 # Messages exceeding this will be uploaded to a pastebin instead (if configured).
 # Set to 0 for unlimited (no pastebin, always split).
 max_lines = 20
+
+# Avatar tuning (see each [[xmpp]] "avatar" option). These apply to every bot
+# avatar. avatar_target_px is the longest-side pixel size images are downscaled
+# to (cosmetic; XEP-0153 suggests small, square avatars). avatar_byte_cap is
+# the hard byte budget for the re-encoded image, so the base64 vcard-temp
+# stanza stays under the server's max stanza size (this is the real limit).
+# avatar_target_px = 96
+# avatar_byte_cap = 65536
 
 # Maximum IRC protocol line length in bytes, used to split over-long messages
 # so the server does not silently truncate them. 0 (default) auto-detects the

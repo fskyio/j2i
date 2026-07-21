@@ -8,6 +8,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Bot avatar support via XEP-0153 (vCard-based avatars): the bridge advertises an avatar in MUCs in both client and component mode. Configurable per XMPP connection with a local path or URL (`avatar`), or a bundled default; images are decoded, downscaled, and re-encoded (Pillow) to fit a configurable byte budget so the vcard-temp stanza stays under the server's max stanza size. Lays the groundwork for bridging IRC user profile metadata to XMPP avatars
 - Split over-long relayed messages into multiple IRC lines on UTF-8/word boundaries so the server no longer silently truncates them; the split pieces count toward `max_lines`, so oversized pastes still fall back to the pastebin
 - Auto-detect the server's line-length limit from the IRCv3 `LINELEN` ISUPPORT token, with a new `max_line_bytes` setting (global or per-bridge) to override the ceiling
 - Test suite (pytest) covering the pure translation helpers: nick sanitizing, IRC→XMPP formatting, pastebin service resolution, and reply/reaction prefix building
