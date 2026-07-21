@@ -67,6 +67,11 @@ relaymsg = true
 # Optional per-network override; defaults to the global settings.relaymsg_suffix.
 # relaymsg_suffix = "xmpp"
 
+# Optional per-network override of the line-length ceiling (bytes) used to split
+# long messages. Unset/0 auto-detects from the server's ISUPPORT LINELEN (512
+# fallback). Overrides the global settings.max_line_bytes for this network.
+# max_line_bytes = 900
+
 # ==============================================================================
 # Bridge mappings
 # ==============================================================================
@@ -107,6 +112,14 @@ anti_ping = true
 # Messages exceeding this will be uploaded to a pastebin instead (if configured).
 # Set to 0 for unlimited (no pastebin, always split).
 max_lines = 20
+
+# Maximum IRC protocol line length in bytes, used to split over-long messages
+# so the server does not silently truncate them. 0 (default) auto-detects the
+# limit from the server's ISUPPORT LINELEN, falling back to the standard 512.
+# Raise this on servers that advertise or allow longer lines. Can be overridden
+# per-network in an [[irc]] block or per-bridge in a [[bridge]] block; the most
+# specific set value wins (bridge > network > global > auto-detect).
+# max_line_bytes = 0
 
 # Pastebin service for long messages. When a multi-line XMPP message exceeds
 # max_lines, it is uploaded here and the link is sent to IRC instead of flooding.

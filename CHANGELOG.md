@@ -8,6 +8,8 @@ and this project follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Split over-long relayed messages into multiple IRC lines on UTF-8/word boundaries so the server no longer silently truncates them; the split pieces count toward `max_lines`, so oversized pastes still fall back to the pastebin
+- Auto-detect the server's line-length limit from the IRCv3 `LINELEN` ISUPPORT token, with a new `max_line_bytes` setting (global or per-bridge) to override the ceiling
 - Test suite (pytest) covering the pure translation helpers: nick sanitizing, IRC→XMPP formatting, pastebin service resolution, and reply/reaction prefix building
 
 ### Fixed

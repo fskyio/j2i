@@ -94,6 +94,8 @@ class IRCClient:
     # ISUPPORT tokens
     has_utf8only: bool = False
     bot_mode_char: str | None = None
+    # Max IRC protocol line length in bytes (ISUPPORT LINELEN, default 512)
+    line_len: int = 512
     _has_sasl: bool = field(default=False, repr=False)
     _sasl_started: bool = field(default=False, repr=False)
     _sasl_done: bool = field(default=False, repr=False)
@@ -149,6 +151,7 @@ class IRCClient:
         self.multiline_max_lines = 0
         self.has_utf8only = False
         self.bot_mode_char = None
+        self.line_len = 512
         self._has_sasl = False
         self._sasl_started = False
         self._sasl_done = False
@@ -509,6 +512,14 @@ class IRCClient:
             if key == "UTF8ONLY":
                 self.has_utf8only = True
                 log.info("Server is UTF8ONLY")
+            elif key == "LINELEN":
+                try:
+                    length = int(value)
+                except ValueError:
+                    continue
+                if length > 0:
+                    self.line_len = length
+                    log.info("Server advertises LINELEN=%d", length)
             elif key == "BOT":
                 self.bot_mode_char = value if value else "B"
                 log.info("Server supports bot mode (mode char: %s)", self.bot_mode_char)

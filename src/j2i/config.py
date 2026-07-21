@@ -28,6 +28,9 @@ class IRCConfig:
     nickserv_password: str | None = None
     relaymsg: bool = True
     relaymsg_suffix: str | None = None
+    # Override the line-length ceiling (bytes) for this network. None/0 = defer
+    # to the global setting, else auto-detect from ISUPPORT LINELEN.
+    max_line_bytes: int | None = None
 
 
 @dataclass
@@ -39,6 +42,7 @@ class BridgeMapping:
     # Per-bridge overrides (None = use global settings)
     anti_ping: bool | None = None
     max_lines: int | None = None
+    max_line_bytes: int | None = None
     pastebin: str | None = None
     pastebin_auth: str | None = None
     pastebin_field: str | None = None
@@ -50,6 +54,10 @@ class BridgeMapping:
 class Settings:
     anti_ping: bool = True
     max_lines: int = 20
+    # Max IRC protocol line length (bytes) to assume when splitting long
+    # messages. 0 = auto-detect from the server's ISUPPORT LINELEN (or 512).
+    # Set this to override/raise the ceiling on servers that allow more.
+    max_line_bytes: int = 0
     pastebin: str | None = None
     pastebin_auth: str | None = None
     pastebin_field: str | None = None

@@ -21,6 +21,51 @@ _NICK_MAP_SIZE = 500
 # Max characters in an inline reply excerpt shown on IRC
 _REPLY_QUOTE_MAX = 60
 
+# Reserve (bytes) for the source prefix ":nick!user@host " that the server
+# prepends when relaying a message to other clients. It counts toward the
+# line-length limit but is not part of what we send, so we hold it back.
+# Sized generously to cover a long nick + ident + host.
+_SOURCE_PREFIX_RESERVE = 100
+
+# Floor for the auto-computed per-line body budget, so pathological framing
+# (e.g. a very long channel name) can never drive it to an unusable value.
+_MIN_LINE_BUDGET = 40
+
+
+def _split_to_byte_limit(text: str, limit: int) -> list[str]:
+    """Split a single logical line into chunks of at most `limit` UTF-8 bytes.
+
+    Breaks on spaces where possible, falling back to a hard character-boundary
+    break for a single word longer than the limit. Never splits a multibyte
+    character. `text` must not contain newlines.
+    """
+    if limit <= 0 or len(text.encode("utf-8")) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining.encode("utf-8")) > limit:
+        # Largest character-aligned prefix that fits in `limit` bytes:
+        # decode the first `limit` bytes and drop any trailing partial char.
+        head = remaining.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        next_char = remaining[len(head):len(head) + 1]
+        if next_char in ("", " "):
+            # `head` already ends on a word boundary; keep it whole.
+            chunk = head
+        else:
+            # `head` cut a word in half; back off to the last space if any.
+            cut = head.rfind(" ")
+            chunk = head[:cut] if cut > 0 else head
+        if not chunk:
+            # A single character wider than the limit; emit it anyway so we
+            # always make progress rather than looping forever.
+            chunk = remaining[0]
+        chunks.append(chunk)
+        remaining = remaining[len(chunk):].lstrip(" ")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
 # Reconnect backoff
 _RECONNECT_BASE = 2  # seconds
 _RECONNECT_MAX = 300  # 5 minutes
@@ -794,7 +839,17 @@ class Bridge:
             else None
         )
 
-        lines = text.split("\n")
+        # Split into logical lines, then break any line that would overflow
+        # the IRC line-length limit into byte-sized pieces. The pieces count
+        # as ordinary lines below, so an oversized paste still hits max_lines
+        # (and thus the pastebin fallback) rather than flooding the channel.
+        body_budget = self._irc_body_budget(
+            irc_client, irc_cfg, channel, msg, b, reply_prefix
+        )
+        lines: list[str] = []
+        for logical_line in text.split("\n"):
+            lines.extend(_split_to_byte_limit(logical_line, body_budget))
+
         max_lines = self._setting(b, "max_lines")
         pastebin = self._setting(b, "pastebin")
 
@@ -848,6 +903,50 @@ class Bridge:
                 irc_client, irc_cfg, channel, msg.nick, f"{prefix}{line}", b,
                 reply_to=reply_tag,
             )
+
+    def _irc_body_budget(
+        self,
+        irc_client: IRCClient,
+        irc_cfg: IRCConfig,
+        channel: str,
+        msg: XMPPMessage,
+        b: BridgeMapping,
+        reply_prefix: str,
+    ) -> int:
+        """Max UTF-8 bytes of message text that fit in one IRC line to `channel`.
+
+        Starts from the line-length ceiling and subtracts everything the wire
+        line carries besides the text itself: CRLF, the ``PRIVMSG <chan> :``
+        framing, the ``<nick> `` display prefix we prepend, the reply excerpt,
+        and a reserve for the source prefix the server adds when relaying onward.
+
+        The ceiling is a ``max_line_bytes`` override resolved most-specific
+        first — per-bridge, then per-IRC-network, then global — and finally the
+        auto-detected server limit (ISUPPORT LINELEN, default 512) when unset.
+        """
+        line_len = irc_client.line_len
+        for override in (
+            b.max_line_bytes,
+            irc_cfg.max_line_bytes,
+            self.config.settings.max_line_bytes,
+        ):
+            if override and override > 0:
+                line_len = override
+                break
+
+        display_nick = (
+            anti_ping(msg.nick) if self._setting(b, "anti_ping") else msg.nick
+        )
+        overhead = (
+            2  # trailing CRLF
+            + _SOURCE_PREFIX_RESERVE
+            + len(b"PRIVMSG ")
+            + len(channel.encode("utf-8"))
+            + len(b" :")
+            + len(f"<{display_nick}> ".encode("utf-8"))
+            + len(reply_prefix.encode("utf-8"))
+        )
+        return max(_MIN_LINE_BUDGET, line_len - overhead)
 
     async def _send_irc_line(
         self,
