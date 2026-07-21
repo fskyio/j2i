@@ -101,6 +101,50 @@ def _puppet_jid(nick: str, irc_name: str, component_domain: str) -> str:
     return f"{localpart}@{component_domain}"
 
 
+def _relaymsg_nick(nick: str, separator: str, suffix: str) -> str:
+    """Apply the RELAYMSG suffix to a (sanitized) nick, e.g. 'alice/bridge'."""
+    return sanitize_irc_nick(nick) + separator + suffix
+
+
+def _excerpt(body: str) -> str:
+    """Flatten newlines and truncate a body to a single-line quote excerpt."""
+    text = body.replace("\n", " ").strip()
+    if len(text) > _REPLY_QUOTE_MAX:
+        text = text[: _REPLY_QUOTE_MAX - 1] + "…"
+    return text
+
+
+def _build_reply_prefix(target: str, style: str, cached_body: str | None) -> str:
+    """Assemble the IRC reply prefix for an already-resolved target nick.
+
+    With style 'quote' and a cached original body, includes a truncated,
+    newline-flattened excerpt: '(re nick: "excerpt…") '. Otherwise falls back
+    to a bare 'nick: ' ping.
+    """
+    if style == "quote" and cached_body:
+        return f'(re {target}: "{_excerpt(cached_body)}") '
+    return f"{target}: "
+
+
+def _build_reaction_text(emoji: str, style: str, cached_body: str | None) -> str:
+    """Build the IRC text body for a bridged XMPP reaction.
+
+    With style 'quote' and a cached original body, includes a truncated
+    excerpt: '(reacted to "excerpt…") <emoji>'. Otherwise falls back to
+    'reacted <emoji>'.
+    """
+    if style == "quote" and cached_body:
+        return f'(reacted to "{_excerpt(cached_body)}") {emoji}'
+    return f"reacted {emoji}"
+
+
+def _strip_nick_prefix(text: str, nick: str | None) -> str:
+    """Remove a leading 'nick: ' fallback prefix from text, if present."""
+    if nick and text.startswith(f"{nick}: "):
+        return text[len(nick) + 2:]
+    return text
+
+
 class Bridge:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -359,10 +403,7 @@ class Bridge:
 
     def _strip_reply_prefix(self, text: str, xmpp_sid: str) -> str:
         """Strip the IRC client's 'nick: ' reply fallback when sending a native reply."""
-        replied_nick = self._msg_id_to_irc_nick.get(xmpp_sid)
-        if replied_nick and text.startswith(f"{replied_nick}: "):
-            return text[len(replied_nick) + 2:]
-        return text
+        return _strip_nick_prefix(text, self._msg_id_to_irc_nick.get(xmpp_sid))
 
     def _make_irc_message_handler(self, irc_name: str):
         async def handler(irc_msg: IRCMessage) -> None:
@@ -707,34 +748,25 @@ class Bridge:
             target = self._msg_id_to_irc_nick[msg.reply_to_id]
         else:
             target = msg.reply_to_nick
+            # Puppet nicks are already real IRC users; only native XMPP users
+            # (or MUCs with no component) get the relaymsg suffix.
             if xmpp_name in self.xmpp_components:
                 component = self.xmpp_components[xmpp_name]
-                if not component.is_puppet_nick(msg.muc_jid, target):
-                    # Native XMPP user: add the relaymsg suffix when active
-                    if irc_cfg.relaymsg and irc_client.has_relaymsg:
-                        target = (
-                            sanitize_irc_nick(target)
-                            + irc_client.relaymsg_separator
-                            + irc_client.relaymsg_suffix
-                        )
-            elif irc_cfg.relaymsg and irc_client.has_relaymsg:
-                target = (
-                    sanitize_irc_nick(target)
-                    + irc_client.relaymsg_separator
-                    + irc_client.relaymsg_suffix
+                is_native = not component.is_puppet_nick(msg.muc_jid, target)
+            else:
+                is_native = True
+            if is_native and irc_cfg.relaymsg and irc_client.has_relaymsg:
+                target = _relaymsg_nick(
+                    target,
+                    irc_client.relaymsg_separator,
+                    irc_client.relaymsg_suffix,
                 )
 
-        # Include an inline excerpt when reply_style is 'quote' and we have
-        # the original body cached
-        if self._setting(b, "reply_style") == "quote" and msg.reply_to_id:
-            cached_body = self._body_cache.get(msg.reply_to_id)
-            if cached_body:
-                excerpt = cached_body.replace("\n", " ").strip()
-                if len(excerpt) > _REPLY_QUOTE_MAX:
-                    excerpt = excerpt[: _REPLY_QUOTE_MAX - 1] + "…"
-                return f'(re {target}: "{excerpt}") '
-
-        return f"{target}: "
+        style = self._setting(b, "reply_style")
+        cached_body = (
+            self._body_cache.get(msg.reply_to_id) if msg.reply_to_id else None
+        )
+        return _build_reply_prefix(target, style, cached_body)
 
     def _format_correction(self, text: str) -> str:
         """Format an edit as an asterisk correction."""
@@ -905,14 +937,10 @@ class Bridge:
         Falls back to:
             reacted <emoji>
         """
-        if self._setting(b, "reply_style") == "quote":
-            cached_body = self._body_cache.get(stanza_id_ref)
-            if cached_body:
-                excerpt = cached_body.replace("\n", " ").strip()
-                if len(excerpt) > _REPLY_QUOTE_MAX:
-                    excerpt = excerpt[: _REPLY_QUOTE_MAX - 1] + "…"
-                return f'(reacted to "{excerpt}") {emoji}'
-        return f"reacted {emoji}"
+        style = self._setting(b, "reply_style")
+        return _build_reaction_text(
+            emoji, style, self._body_cache.get(stanza_id_ref)
+        )
 
     def _make_xmpp_reaction_handler(self, xmpp_name: str):
         async def handler(

@@ -37,6 +37,16 @@ Issues = "https://foundry.fsky.io/fsky/j2i/issues"
 [project.scripts]
 j2i = "j2i.__main__:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
 [build-system]
 requires = ["uv_build>=0.10.12,<0.11.0"]
 build-backend = "uv_build"

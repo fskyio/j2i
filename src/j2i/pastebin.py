@@ -33,12 +33,16 @@ async def upload(
     )
 
 
-def _upload_sync(
+def _resolve_service(
     service: str,
-    text: str,
-    auth: str | None = None,
     field_override: str | None = None,
-) -> str | None:
+) -> tuple[str, str]:
+    """Resolve a service name or custom URL to its (url, form_field) pair.
+
+    Known services use their registered URL and field name; anything else is
+    treated as a URL (https:// prefixed if no scheme is given) with a "txt"
+    field. An explicit field_override always wins.
+    """
     if service in _KNOWN_SERVICES:
         url, field_name = _KNOWN_SERVICES[service]
     else:
@@ -47,6 +51,17 @@ def _upload_sync(
 
     if field_override:
         field_name = field_override
+
+    return url, field_name
+
+
+def _upload_sync(
+    service: str,
+    text: str,
+    auth: str | None = None,
+    field_override: str | None = None,
+) -> str | None:
+    url, field_name = _resolve_service(service, field_override)
 
     try:
         boundary = "----j2iBoundary"

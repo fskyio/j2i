@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Test suite (pytest) covering the pure translation helpers: nick sanitizing, IRC→XMPP formatting, pastebin service resolution, and reply/reaction prefix building
+
+### Changed
+- Make RELAYMSG suffix configurable
+- Refactored reply/reaction prefix formatting into pure helpers and de-duplicated the shared excerpt-truncation and RELAYMSG-suffix logic
+
 ## [1.1.0] - 2026-04-29
 
 ### Added
