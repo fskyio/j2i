@@ -27,6 +27,7 @@ class IRCConfig:
     sasl_password: str | None = None
     nickserv_password: str | None = None
     relaymsg: bool = True
+    relaymsg_suffix: str | None = None
 
 
 @dataclass
@@ -54,6 +55,8 @@ class Settings:
     pastebin_field: str | None = None
     # Reply style: "quote" (inline excerpt) or "ping" (nick mention only)
     reply_style: str = "quote"
+    # Suffix appended to spoofed nicks in RELAYMSG (e.g. spoofednick/xmpp)
+    relaymsg_suffix: str = "xmpp"
 
 
 @dataclass

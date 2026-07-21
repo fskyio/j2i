@@ -60,6 +60,7 @@ class IRCClient:
     # Capabilities detected during negotiation
     has_relaymsg: bool = False
     relaymsg_separator: str = "/"
+    relaymsg_suffix: str = "xmpp"
     has_message_tags: bool = False
     has_echo_message: bool = False
     has_batch: bool = False
@@ -202,7 +203,7 @@ class IRCClient:
         self, channel: str, spoofed_nick: str, text: str,
         reply_to: str | None = None,
     ) -> None:
-        nick = f"{spoofed_nick}{self.relaymsg_separator}xmpp"
+        nick = f"{spoofed_nick}{self.relaymsg_separator}{self.relaymsg_suffix}"
         tag_prefix = f"@+reply={reply_to} " if reply_to and self.has_message_tags else ""
         await self._send(f"{tag_prefix}RELAYMSG {channel} {nick} :{text}")
 
@@ -649,7 +650,7 @@ class IRCClient:
         is_self = nick == self.nick
         if not is_self and self.has_relaymsg and self.relaymsg_separator in nick:
             suffix = nick.split(self.relaymsg_separator)[-1]
-            if suffix == "xmpp":
+            if suffix == self.relaymsg_suffix:
                 is_self = True
 
         if is_self:
@@ -727,7 +728,7 @@ class IRCClient:
         is_self = nick == self.nick
         if not is_self and self.has_relaymsg and self.relaymsg_separator in nick:
             suffix = nick.split(self.relaymsg_separator)[-1]
-            if suffix == "xmpp":
+            if suffix == self.relaymsg_suffix:
                 is_self = True
         if is_self:
             if batch.msgid and self.on_self_message:

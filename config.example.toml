@@ -62,6 +62,11 @@ nick = "xmpp-bridge"
 # When false, falls back to "<nick> message" format.
 relaymsg = true
 
+# Suffix appended to spoofed nicks so they're distinguishable from real IRC
+# users (e.g. alice/xmpp; the "/" separator is negotiated with the network).
+# Optional per-network override; defaults to the global settings.relaymsg_suffix.
+# relaymsg_suffix = "xmpp"
+
 # ==============================================================================
 # Bridge mappings
 # ==============================================================================
@@ -127,3 +132,7 @@ max_lines = 20
 # The excerpt is sourced from an in-memory cache (up to 500 messages). Cache
 # misses (e.g. after a restart) fall back to "ping" style automatically.
 reply_style = "quote"
+
+# Global default suffix appended to spoofed nicks in RELAYMSG (e.g. alice/xmpp).
+# Individual networks can override this with relaymsg_suffix in their [[irc]] block.
+relaymsg_suffix = "xmpp"

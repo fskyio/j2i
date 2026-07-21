@@ -219,6 +219,11 @@ class Bridge:
                 tls=irc_cfg.tls,
                 sasl_password=irc_cfg.sasl_password,
                 nickserv_password=irc_cfg.nickserv_password,
+                relaymsg_suffix=(
+                    irc_cfg.relaymsg_suffix
+                    if irc_cfg.relaymsg_suffix is not None
+                    else self.config.settings.relaymsg_suffix
+                ),
             )
             self.irc_clients[irc_cfg.name] = client
 
@@ -705,18 +710,18 @@ class Bridge:
             if xmpp_name in self.xmpp_components:
                 component = self.xmpp_components[xmpp_name]
                 if not component.is_puppet_nick(msg.muc_jid, target):
-                    # Native XMPP user: add /xmpp suffix when relaymsg is active
+                    # Native XMPP user: add the relaymsg suffix when active
                     if irc_cfg.relaymsg and irc_client.has_relaymsg:
                         target = (
                             sanitize_irc_nick(target)
                             + irc_client.relaymsg_separator
-                            + "xmpp"
+                            + irc_client.relaymsg_suffix
                         )
             elif irc_cfg.relaymsg and irc_client.has_relaymsg:
                 target = (
                     sanitize_irc_nick(target)
                     + irc_client.relaymsg_separator
-                    + "xmpp"
+                    + irc_client.relaymsg_suffix
                 )
 
         # Include an inline excerpt when reply_style is 'quote' and we have
