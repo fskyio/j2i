@@ -75,6 +75,10 @@ class Settings:
     # Longest-side pixel target avatars are downscaled to before encoding.
     # XEP-0153 suggests small, square images; this is a display nicety.
     avatar_target_px: int = 96
+    # Hide the package version from XEP-0092, the XMPP resource, and disco identity.
+    hide_version: bool = False
+    # Omit OS from XEP-0092 replies (resource/disco never include it).
+    hide_os: bool = False
 
 
 @dataclass

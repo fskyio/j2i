@@ -163,3 +163,10 @@ reply_style = "quote"
 # Global default suffix appended to spoofed nicks in RELAYMSG (e.g. alice/xmpp).
 # Individual networks can override this with relaymsg_suffix in their [[irc]] block.
 relaymsg_suffix = "xmpp"
+
+# Software identity (XEP-0092 version queries, XMPP resource, disco/caps name).
+# hide_version: announce "j2i" without the package version number.
+# hide_os: omit the operating system from XEP-0092 replies (required by the XEP
+# as an admin switch; resource and disco never include the OS).
+# hide_version = false
+# hide_os = false

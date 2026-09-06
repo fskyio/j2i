@@ -285,6 +285,8 @@ class Bridge:
     def _build_clients(self) -> None:
         for xmpp_cfg in self.config.xmpp:
             avatar = self._load_avatar(xmpp_cfg)
+            hide_version = self.config.settings.hide_version
+            hide_os = self.config.settings.hide_os
             if xmpp_cfg.component:
                 client: XMPPClient | XMPPComponent = XMPPComponent(
                     component_domain=xmpp_cfg.component_domain,  # type: ignore[arg-type]
@@ -293,6 +295,8 @@ class Bridge:
                     component_port=xmpp_cfg.component_port,
                     nick=xmpp_cfg.nick,
                     avatar=avatar,
+                    hide_version=hide_version,
+                    hide_os=hide_os,
                 )
                 self.xmpp_components[xmpp_cfg.name] = client  # type: ignore[assignment]
             else:
@@ -301,6 +305,8 @@ class Bridge:
                     password=xmpp_cfg.password,
                     nick=xmpp_cfg.nick,
                     avatar=avatar,
+                    hide_version=hide_version,
+                    hide_os=hide_os,
                 )
             self.xmpp_clients[xmpp_cfg.name] = client
 

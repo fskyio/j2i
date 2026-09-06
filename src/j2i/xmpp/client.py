@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from importlib.metadata import version as _pkg_version
 from typing import Callable, Awaitable
 from xml.etree.ElementTree import SubElement
 
 import slixmpp
 
+from j2i.version import CAPS_NODE, software_label, xep_0092_config
 from j2i.xmpp.avatar import Avatar
 
 log = logging.getLogger(__name__)
@@ -41,6 +41,28 @@ _NS_REACTIONS = "urn:xmpp:reactions:0"
 _NS_HINTS = "urn:xmpp:hints"
 
 
+def configure_software_identity(
+    xmpp: slixmpp.BaseXMPP,
+    *,
+    hide_version: bool = False,
+    hide_os: bool = False,
+    identity_category: str = "client",
+    identity_type: str = "bot",
+) -> None:
+    """Register XEP-0092 and stamp disco/caps so we identify as j2i, not slixmpp."""
+    xmpp.register_plugin(
+        "xep_0092",
+        xep_0092_config(hide_version=hide_version, hide_os=hide_os),
+    )
+    # xep_0045 pulls in xep_0115 (Entity Capabilities) transitively
+    xmpp["xep_0115"].caps_node = CAPS_NODE
+    xmpp["xep_0030"].add_identity(
+        category=identity_category,
+        itype=identity_type,
+        name=software_label(hide_version=hide_version),
+    )
+
+
 class XMPPClient:
     def __init__(
         self,
@@ -48,6 +70,8 @@ class XMPPClient:
         password: str,
         nick: str = "IRC Bridge",
         avatar: Avatar | None = None,
+        hide_version: bool = False,
+        hide_os: bool = False,
     ) -> None:
         self.nick = nick
         self._avatar = avatar
@@ -60,12 +84,9 @@ class XMPPClient:
         self._stopping = False
 
         self._xmpp = slixmpp.ClientXMPP(jid, password)
-        try:
-            _ver = _pkg_version("j2i")
-            self._xmpp.requested_jid.resource = f"j2i {_ver}"
-        except Exception:
-            _ver = ""
-            self._xmpp.requested_jid.resource = "j2i"
+        self._xmpp.requested_jid.resource = software_label(
+            hide_version=hide_version
+        )
         self._xmpp.register_plugin("xep_0045")   # MUC
         self._xmpp.register_plugin("xep_0054")   # vcard-temp
         self._xmpp.register_plugin("xep_0153")   # vCard-Based Avatars
@@ -74,12 +95,8 @@ class XMPPClient:
         self._xmpp.register_plugin("xep_0308")   # Last Message Correction
         self._xmpp.register_plugin("xep_0444")   # Message Reactions
         self._xmpp.register_plugin("xep_0461")   # Message Replies
-        # xep_0045 pulls in xep_0115 (Entity Capabilities) transitively;
-        # override slixmpp defaults so clients see "j2i" not "Slixmpp x.y.z"
-        self._xmpp["xep_0115"].caps_node = "https://fsky.io/projects/j2i"
-        self._xmpp["xep_0030"].add_identity(
-            category="client", itype="bot",
-            name=f"j2i {_ver}".strip() if _ver else "j2i",
+        configure_software_identity(
+            self._xmpp, hide_version=hide_version, hide_os=hide_os
         )
 
         self._xmpp.add_event_handler("session_start", self._on_session_start)

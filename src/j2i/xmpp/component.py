@@ -11,7 +11,7 @@ import slixmpp
 from j2i.xmpp.avatar import Avatar
 from j2i.xmpp.client import (
     XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback,
-    ReactionCallback, _NS_REACTIONS, _NS_HINTS,
+    ReactionCallback, _NS_REACTIONS, _NS_HINTS, configure_software_identity,
 )
 
 ReconnectedCallback = Callable[[], Awaitable[None]]
@@ -47,6 +47,8 @@ class XMPPComponent:
         component_port: int = 5347,
         nick: str = "IRC Bridge",
         avatar: Avatar | None = None,
+        hide_version: bool = False,
+        hide_os: bool = False,
     ) -> None:
         self.nick = nick
         self._avatar = avatar
@@ -79,6 +81,13 @@ class XMPPComponent:
         self._xmpp.register_plugin("xep_0308")
         self._xmpp.register_plugin("xep_0444")
         self._xmpp.register_plugin("xep_0461")
+        configure_software_identity(
+            self._xmpp,
+            hide_version=hide_version,
+            hide_os=hide_os,
+            identity_category="gateway",
+            identity_type="irc",
+        )
 
         self._xmpp.add_event_handler("session_start", self._on_session_start)
         self._xmpp.add_event_handler("disconnected", self._on_disconnected)
