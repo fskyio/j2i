@@ -12,6 +12,7 @@ from j2i.xmpp.avatar import Avatar
 from j2i.xmpp.client import (
     XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback,
     ReactionCallback, _NS_REACTIONS, _NS_HINTS, configure_software_identity,
+    extract_stanza_id,
 )
 
 ReconnectedCallback = Callable[[], Awaitable[None]]
@@ -536,10 +537,11 @@ class XMPPComponent:
         if self._is_puppet_echo(muc_key, nick):
             if self.on_self_message:
                 client_id = msg["id"]
-                stanza_id_el = msg.xml.find("{urn:xmpp:sid:0}stanza-id")
-                stanza_id = stanza_id_el.get("id") if stanza_id_el is not None else None
+                stanza_id, stanza_id_by = extract_stanza_id(msg)
                 if client_id and stanza_id:
-                    await self.on_self_message(client_id, stanza_id)
+                    await self.on_self_message(
+                        muc_jid, client_id, stanza_id, stanza_id_by
+                    )
             return
 
         body = msg["body"]
@@ -560,9 +562,7 @@ class XMPPComponent:
         if is_action:
             body = body[4:]
 
-        stanza_id_el = msg.xml.find("{urn:xmpp:sid:0}stanza-id")
-        stanza_id = stanza_id_el.get("id") if stanza_id_el is not None else None
-
+        stanza_id, stanza_id_by = extract_stanza_id(msg)
         xmpp_msg = XMPPMessage(
             muc_jid=muc_jid,
             nick=nick,
@@ -572,6 +572,7 @@ class XMPPComponent:
             reply_to_id=reply_id or None,
             is_correction=is_correction,
             stanza_id=stanza_id,
+            stanza_id_by=stanza_id_by,
         )
 
         if self.on_message:

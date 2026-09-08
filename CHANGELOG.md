@@ -16,6 +16,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - Redact credentials (SASL payload, NickServ `IDENTIFY` password, server `PASS`) from debug logs; the command remains visible but the secret is masked as `<redacted>`
+- Scope reply, reaction, and body caches by connection and room so identical IRC/XMPP identifiers from different networks cannot collide
 
 ### Changed
 - Make RELAYMSG suffix configurable

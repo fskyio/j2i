@@ -27,11 +27,13 @@ class XMPPMessage:
     is_correction: bool = False
     # Server-assigned stanza-id (XEP-0359), used for reply threading
     stanza_id: str | None = None
+    # XEP-0359 stanza-id `by` (generating entity, typically the MUC JID)
+    stanza_id_by: str | None = None
 
 
 MessageCallback = Callable[[XMPPMessage], Awaitable[None]]
-# Called when our own message is reflected back: (client_id, server_stanza_id)
-SelfMessageCallback = Callable[[str, str], Awaitable[None]]
+# Own message reflected back: (muc_jid, client_id, stanza_id, stanza_id_by)
+SelfMessageCallback = Callable[[str, str, str, str | None], Awaitable[None]]
 # Typing: (muc_jid, nick, is_typing)
 TypingCallback = Callable[[str, str, bool], Awaitable[None]]
 # Reactions: (muc_jid, nick, stanza_id_ref, emojis)
@@ -39,6 +41,15 @@ ReactionCallback = Callable[[str, str, str, "frozenset[str]"], Awaitable[None]]
 
 _NS_REACTIONS = "urn:xmpp:reactions:0"
 _NS_HINTS = "urn:xmpp:hints"
+_NS_SID = "urn:xmpp:sid:0"
+
+
+def extract_stanza_id(msg: slixmpp.Message) -> tuple[str | None, str | None]:
+    """Return ``(id, by)`` from a XEP-0359 ``<stanza-id/>``, or ``(None, None)``."""
+    el = msg.xml.find(f"{{{_NS_SID}}}stanza-id")
+    if el is None:
+        return None, None
+    return el.get("id"), el.get("by")
 
 
 def configure_software_identity(
@@ -245,9 +256,11 @@ class XMPPClient:
             # stanza-id and map it to our client-generated id
             if self.on_self_message:
                 client_id = msg["id"]
-                stanza_id = self._extract_stanza_id(msg)
+                stanza_id, stanza_id_by = extract_stanza_id(msg)
                 if client_id and stanza_id:
-                    await self.on_self_message(client_id, stanza_id)
+                    await self.on_self_message(
+                        str(msg["from"].bare), client_id, stanza_id, stanza_id_by
+                    )
             return
 
         body = msg["body"]
@@ -276,6 +289,7 @@ class XMPPClient:
         if is_action:
             body = body[4:]
 
+        stanza_id, stanza_id_by = extract_stanza_id(msg)
         xmpp_msg = XMPPMessage(
             muc_jid=muc_jid,
             nick=nick,
@@ -284,7 +298,8 @@ class XMPPClient:
             reply_to_nick=reply_to_nick,
             reply_to_id=reply_id or None,
             is_correction=is_correction,
-            stanza_id=self._extract_stanza_id(msg),
+            stanza_id=stanza_id,
+            stanza_id_by=stanza_id_by,
         )
 
         if self.on_message:
@@ -326,13 +341,6 @@ class XMPPClient:
         muc_jid = str(msg["from"].bare)
         if self.on_typing:
             await self.on_typing(muc_jid, nick, False)
-
-    @staticmethod
-    def _extract_stanza_id(msg: slixmpp.Message) -> str | None:
-        el = msg.xml.find("{urn:xmpp:sid:0}stanza-id")
-        if el is not None:
-            return el.get("id")
-        return None
 
     def stop(self) -> None:
         self._stopping = True

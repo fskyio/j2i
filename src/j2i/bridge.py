@@ -4,6 +4,8 @@ import asyncio
 import collections
 import logging
 import re
+from dataclasses import dataclass
+from typing import TypeVar
 
 from j2i.config import Config, BridgeMapping, IRCConfig
 from j2i.irc.client import IRCClient, IRCMessage
@@ -191,6 +193,60 @@ def _strip_nick_prefix(text: str, nick: str | None) -> str:
     return text
 
 
+@dataclass(frozen=True)
+class MsgRef:
+    """A message identifier scoped to one connection and room.
+
+    IRC msgids and XMPP stanza-ids are only unique within their generating
+    entity, so bare strings collide across networks and rooms. Equality and
+    hashing ignore ``by``: XEP-0461 replies and XEP-0444 reactions usually
+    carry only the id, while XEP-0359 uniqueness is ``(id, by)``. Lookups
+    without ``by`` still match the stored ref for that connection/room/id.
+    """
+    conn: str
+    room: str
+    id: str
+    by: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "room", self.room.lower())
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MsgRef):
+            return NotImplemented
+        return (self.conn, self.room, self.id) == (other.conn, other.room, other.id)
+
+    def __hash__(self) -> int:
+        return hash((self.conn, self.room, self.id))
+
+
+def irc_ref(conn: str, channel: str, msgid: str) -> MsgRef:
+    return MsgRef(conn=conn, room=channel, id=msgid)
+
+
+def xmpp_ref(
+    conn: str, muc_jid: str, ident: str, by: str | None = None
+) -> MsgRef:
+    return MsgRef(conn=conn, room=muc_jid, id=ident, by=by)
+
+
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+def _lru_put(mapping: collections.OrderedDict[_K, _V], key: _K, value: _V) -> None:
+    mapping[key] = value
+    if len(mapping) > _NICK_MAP_SIZE:
+        mapping.popitem(last=False)
+
+
+def _lru_touch(mapping: collections.OrderedDict[_K, _V], key: _K) -> None:
+    if key in mapping:
+        mapping.move_to_end(key)
+    elif len(mapping) >= _NICK_MAP_SIZE:
+        mapping.popitem(last=False)
+
+
 class Bridge:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -205,56 +261,54 @@ class Bridge:
         self._irc_to_bridges: dict[tuple[str, str], list[BridgeMapping]] = {}
         self._xmpp_to_bridges: dict[tuple[str, str], list[BridgeMapping]] = {}
 
-        # Maps XMPP message ID -> original IRC nick, so replies to bridged
+        # Maps XMPP message ref -> original IRC nick, so replies to bridged
         # messages can resolve the actual IRC user instead of the bot nick.
-        self._msg_id_to_irc_nick: collections.OrderedDict[str, str] = (
+        self._msg_id_to_irc_nick: collections.OrderedDict[MsgRef, str] = (
             collections.OrderedDict()
         )
 
-        # Reply threading (IRC msgid → XMPP stanza-id)
-        # Temp: XMPP client_id → IRC msgid (cleared when stanza-id arrives)
-        self._xmpp_cid_to_irc_msgid: dict[str, str] = {}
-        # Final: IRC msgid → XMPP stanza-id (used when IRC user replies)
-        self._irc_msgid_to_xmpp_sid: collections.OrderedDict[str, str] = (
+        # Reply threading (IRC msgid ref → XMPP stanza-id ref)
+        # Temp: XMPP client_id ref → IRC msgid ref (cleared when stanza-id arrives)
+        self._xmpp_cid_to_irc_msgid: dict[MsgRef, MsgRef] = {}
+        # Final: IRC msgid ref → XMPP stanza-id ref (used when IRC user replies)
+        self._irc_msgid_to_xmpp_sid: collections.OrderedDict[MsgRef, MsgRef] = (
             collections.OrderedDict()
         )
-        # Reverse: XMPP stanza-id → IRC msgid (for XMPP→IRC native reply tags)
-        self._xmpp_sid_to_irc_msgid: collections.OrderedDict[str, str] = (
+        # Reverse: XMPP stanza-id ref → IRC msgid ref (for XMPP→IRC native reply tags)
+        self._xmpp_sid_to_irc_msgid: collections.OrderedDict[MsgRef, MsgRef] = (
             collections.OrderedDict()
         )
-        # Pending XMPP stanza-ids awaiting IRC echo-message, per (irc_name, channel)
+        # Pending XMPP stanza-id refs awaiting IRC echo-message, per (irc_name, channel)
         self._pending_echo_sids: dict[
-            tuple[str, str], collections.deque[str]
+            tuple[str, str], collections.deque[MsgRef]
         ] = {}
 
         # Sender MUC occupant JID tracking for XEP-0461 reply "to" attribute
-        # Temp: XMPP client_id → sender MUC occupant JID (cleared when stanza-id arrives)
-        self._xmpp_cid_to_sender_jid: dict[str, str] = {}
-        # Final: XMPP stanza-id → sender MUC occupant JID
-        self._xmpp_sid_to_sender_jid: collections.OrderedDict[str, str] = (
+        # Temp: XMPP client_id ref → sender MUC occupant JID
+        self._xmpp_cid_to_sender_jid: dict[MsgRef, str] = {}
+        # Final: XMPP stanza-id ref → sender MUC occupant JID
+        self._xmpp_sid_to_sender_jid: collections.OrderedDict[MsgRef, str] = (
             collections.OrderedDict()
         )
 
-        # Reaction state for IRC → XMPP: irc_msgid → {nick: current emoji set}
-        # Keyed by the IRC msgid of the message being reacted to.
+        # Reaction state for IRC → XMPP: irc msgid ref → {nick: current emoji set}
         self._irc_reaction_state: collections.OrderedDict[
-            str, dict[str, set[str]]
+            MsgRef, dict[str, set[str]]
         ] = collections.OrderedDict()
 
-        # Reaction state for XMPP → IRC: xmpp_sid → {nick: previous emoji frozenset}
-        # Tracks what was last sent so we can compute added/removed deltas.
+        # Reaction state for XMPP → IRC: xmpp sid ref → {nick: previous emoji frozenset}
         self._xmpp_reaction_state: collections.OrderedDict[
-            str, dict[str, frozenset[str]]
+            MsgRef, dict[str, frozenset[str]]
         ] = collections.OrderedDict()
 
-        # Body cache for inline reply excerpts: XMPP stanza-id → message body.
+        # Body cache for inline reply excerpts: XMPP stanza-id ref → message body.
         # Populated for both XMPP messages (on receipt) and IRC messages (once
-        # the echo maps client_id → stanza-id in _on_xmpp_self_message).
-        self._body_cache: collections.OrderedDict[str, str] = (
+        # the echo maps client_id → stanza-id in the XMPP self-message handler).
+        self._body_cache: collections.OrderedDict[MsgRef, str] = (
             collections.OrderedDict()
         )
-        # Temp: XMPP client_id → body (until stanza-id is known)
-        self._pending_body: dict[str, str] = {}
+        # Temp: XMPP client_id ref → body (until stanza-id is known)
+        self._pending_body: dict[MsgRef, str] = {}
 
         self._stopping: bool = False
 
@@ -265,11 +319,15 @@ class Bridge:
             return val
         return getattr(self.config.settings, name)
 
-    def _cache_body(self, stanza_id: str, body: str) -> None:
+    def _cache_body(self, ref: MsgRef, body: str) -> None:
         """Store a message body in the bounded reply-excerpt cache."""
-        self._body_cache[stanza_id] = body
-        if len(self._body_cache) > _NICK_MAP_SIZE:
-            self._body_cache.popitem(last=False)
+        _lru_put(self._body_cache, ref, body)
+
+    def _xmpp_sid_ref(
+        self, xmpp_name: str, muc_jid: str, ident: str, by: str | None = None
+    ) -> MsgRef:
+        """Build a stanza-id ref, defaulting ``by`` to the MUC JID when omitted."""
+        return xmpp_ref(xmpp_name, muc_jid, ident, by=by or muc_jid)
 
     def stop(self) -> None:
         self._stopping = True
@@ -381,7 +439,7 @@ class Bridge:
 
         for xmpp_name, client in self.xmpp_clients.items():
             client.on_message = self._make_xmpp_handler(xmpp_name)
-            client.on_self_message = self._on_xmpp_self_message
+            client.on_self_message = self._make_xmpp_self_msg_handler(xmpp_name)
             client.on_reaction = self._make_xmpp_reaction_handler(xmpp_name)
 
         for xmpp_name, component in self.xmpp_components.items():
@@ -446,44 +504,45 @@ class Bridge:
 
     # ---------- IRC -> XMPP ----------
 
-    def _record_msg_id(self, msg_id: str, irc_nick: str) -> None:
-        log.debug("Recording msg_id=%s -> irc_nick=%s", msg_id, irc_nick)
-        self._msg_id_to_irc_nick[msg_id] = irc_nick
-        if len(self._msg_id_to_irc_nick) > _NICK_MAP_SIZE:
-            self._msg_id_to_irc_nick.popitem(last=False)
+    def _record_msg_id(self, ref: MsgRef, irc_nick: str) -> None:
+        log.debug("Recording %s -> irc_nick=%s", ref, irc_nick)
+        _lru_put(self._msg_id_to_irc_nick, ref, irc_nick)
 
-    async def _on_xmpp_self_message(
-        self, client_id: str, stanza_id: str
-    ) -> None:
-        """Re-key nick and IRC msgid mappings when we learn the server stanza-id."""
-        irc_nick = self._msg_id_to_irc_nick.pop(client_id, None)
-        if irc_nick:
-            log.debug(
-                "Re-keying %s -> %s for nick=%s",
-                client_id, stanza_id, irc_nick,
-            )
-            self._msg_id_to_irc_nick[stanza_id] = irc_nick
+    def _make_xmpp_self_msg_handler(self, xmpp_name: str):
+        async def handler(
+            muc_jid: str,
+            client_id: str,
+            stanza_id: str,
+            stanza_id_by: str | None,
+        ) -> None:
+            """Re-key nick and IRC msgid mappings when we learn the server stanza-id."""
+            cid = xmpp_ref(xmpp_name, muc_jid, client_id)
+            sid = self._xmpp_sid_ref(xmpp_name, muc_jid, stanza_id, stanza_id_by)
 
-        sender_jid = self._xmpp_cid_to_sender_jid.pop(client_id, None)
-        if sender_jid:
-            self._xmpp_sid_to_sender_jid[stanza_id] = sender_jid
-            if len(self._xmpp_sid_to_sender_jid) > _NICK_MAP_SIZE:
-                self._xmpp_sid_to_sender_jid.popitem(last=False)
+            irc_nick = self._msg_id_to_irc_nick.pop(cid, None)
+            if irc_nick:
+                log.debug(
+                    "Re-keying %s -> %s for nick=%s",
+                    cid, sid, irc_nick,
+                )
+                self._msg_id_to_irc_nick[sid] = irc_nick
 
-        irc_msgid = self._xmpp_cid_to_irc_msgid.pop(client_id, None)
-        if irc_msgid:
-            self._irc_msgid_to_xmpp_sid[irc_msgid] = stanza_id
-            if len(self._irc_msgid_to_xmpp_sid) > _NICK_MAP_SIZE:
-                self._irc_msgid_to_xmpp_sid.popitem(last=False)
-            self._xmpp_sid_to_irc_msgid[stanza_id] = irc_msgid
-            if len(self._xmpp_sid_to_irc_msgid) > _NICK_MAP_SIZE:
-                self._xmpp_sid_to_irc_msgid.popitem(last=False)
+            sender_jid = self._xmpp_cid_to_sender_jid.pop(cid, None)
+            if sender_jid:
+                _lru_put(self._xmpp_sid_to_sender_jid, sid, sender_jid)
 
-        body = self._pending_body.pop(client_id, None)
-        if body is not None:
-            self._cache_body(stanza_id, body)
+            irc_msgid = self._xmpp_cid_to_irc_msgid.pop(cid, None)
+            if irc_msgid:
+                _lru_put(self._irc_msgid_to_xmpp_sid, irc_msgid, sid)
+                _lru_put(self._xmpp_sid_to_irc_msgid, sid, irc_msgid)
 
-    def _strip_reply_prefix(self, text: str, xmpp_sid: str) -> str:
+            body = self._pending_body.pop(cid, None)
+            if body is not None:
+                self._cache_body(sid, body)
+
+        return handler
+
+    def _strip_reply_prefix(self, text: str, xmpp_sid: MsgRef) -> str:
         """Strip the IRC client's 'nick: ' reply fallback when sending a native reply."""
         return _strip_nick_prefix(text, self._msg_id_to_irc_nick.get(xmpp_sid))
 
@@ -495,7 +554,9 @@ class Bridge:
             bridges = self._irc_to_bridges.get(key, [])
             for b in bridges:
                 xmpp_sid = (
-                    self._irc_msgid_to_xmpp_sid.get(irc_msg.reply_to_msgid)
+                    self._irc_msgid_to_xmpp_sid.get(
+                        irc_ref(irc_name, channel, irc_msg.reply_to_msgid)
+                    )
                     if irc_msg.reply_to_msgid
                     else None
                 )
@@ -515,22 +576,25 @@ class Bridge:
                     pjid = _puppet_jid(nick, irc_cfg.name, xmpp_cfg.component_domain)  # type: ignore[arg-type]
                     if xmpp_sid:
                         msg_id = await component.send_puppet_reply(
-                            b.xmpp_muc, pjid, relay_text, xmpp_sid,
+                            b.xmpp_muc, pjid, relay_text, xmpp_sid.id,
                             reply_to=reply_to_sender,
                         )
                     else:
                         msg_id = await component.send_puppet_message(b.xmpp_muc, pjid, relay_text)
                     if not msg_id:
                         continue
-                    self._record_msg_id(msg_id, nick)
-                    self._pending_body[msg_id] = relay_text
+                    cid = xmpp_ref(b.xmpp, b.xmpp_muc, msg_id)
+                    self._record_msg_id(cid, nick)
+                    self._pending_body[cid] = relay_text
                     if irc_msg.msgid:
-                        self._xmpp_cid_to_irc_msgid[msg_id] = irc_msg.msgid
+                        self._xmpp_cid_to_irc_msgid[cid] = irc_ref(
+                            irc_name, channel, irc_msg.msgid
+                        )
                     # Track sender MUC JID for future replies to this message
                     actual_nick = component._puppet_nicks.get(
                         b.xmpp_muc.lower(), {}
                     ).get(pjid, nick)
-                    self._xmpp_cid_to_sender_jid[msg_id] = f"{b.xmpp_muc}/{actual_nick}"
+                    self._xmpp_cid_to_sender_jid[cid] = f"{b.xmpp_muc}/{actual_nick}"
                 else:
                     xmpp_client = self.xmpp_clients[b.xmpp]
                     display_nick = (
@@ -539,19 +603,22 @@ class Bridge:
                     await xmpp_client.send_typing(b.xmpp_muc, False)
                     if xmpp_sid:
                         msg_id = await xmpp_client.send_reply(
-                            b.xmpp_muc, f"<{display_nick}> {relay_text}", xmpp_sid,
+                            b.xmpp_muc, f"<{display_nick}> {relay_text}", xmpp_sid.id,
                             reply_to=reply_to_sender,
                         )
                     else:
                         msg_id = await xmpp_client.send_message(
                             b.xmpp_muc, f"<{display_nick}> {relay_text}"
                         )
-                    self._record_msg_id(msg_id, nick)
-                    self._pending_body[msg_id] = relay_text
+                    cid = xmpp_ref(b.xmpp, b.xmpp_muc, msg_id)
+                    self._record_msg_id(cid, nick)
+                    self._pending_body[cid] = relay_text
                     if irc_msg.msgid:
-                        self._xmpp_cid_to_irc_msgid[msg_id] = irc_msg.msgid
+                        self._xmpp_cid_to_irc_msgid[cid] = irc_ref(
+                            irc_name, channel, irc_msg.msgid
+                        )
                     # Track sender MUC JID for future replies to this message
-                    self._xmpp_cid_to_sender_jid[msg_id] = f"{b.xmpp_muc}/{xmpp_client.nick}"
+                    self._xmpp_cid_to_sender_jid[cid] = f"{b.xmpp_muc}/{xmpp_client.nick}"
 
         return handler
 
@@ -577,7 +644,7 @@ class Bridge:
                     msg_id = await xmpp_client.send_message(
                         b.xmpp_muc, f"* {display_nick} {text}"
                     )
-                    self._record_msg_id(msg_id, nick)
+                    self._record_msg_id(xmpp_ref(b.xmpp, b.xmpp_muc, msg_id), nick)
 
         return handler
 
@@ -741,9 +808,15 @@ class Bridge:
             key = (xmpp_name, msg.muc_jid.lower())
             bridges = self._xmpp_to_bridges.get(key, [])
 
-            # Cache body for reply excerpts (keyed by XMPP stanza-id)
-            if msg.stanza_id:
-                self._cache_body(msg.stanza_id, msg.body)
+            sid = (
+                self._xmpp_sid_ref(
+                    xmpp_name, msg.muc_jid, msg.stanza_id, msg.stanza_id_by
+                )
+                if msg.stanza_id
+                else None
+            )
+            if sid:
+                self._cache_body(sid, msg.body)
 
             for b in bridges:
                 irc_client = self.irc_clients[b.irc]
@@ -756,18 +829,18 @@ class Bridge:
                     await self._relay_to_irc(
                         irc_client, irc_cfg, b.irc_channel, msg, b, xmpp_name
                     )
-                # Store sender MUC occupant JID for reply "to" attribute
-                if msg.stanza_id:
-                    self._xmpp_sid_to_sender_jid[msg.stanza_id] = f"{msg.muc_jid}/{msg.nick}"
-                    if len(self._xmpp_sid_to_sender_jid) > _NICK_MAP_SIZE:
-                        self._xmpp_sid_to_sender_jid.popitem(last=False)
-                # Queue the XMPP stanza-id so the IRC echo-message can map it
-                if msg.stanza_id and irc_client.has_echo_message:
-                    echo_key = (b.irc, b.irc_channel.lower())
-                    q = self._pending_echo_sids.setdefault(
-                        echo_key, collections.deque(maxlen=_NICK_MAP_SIZE)
+                if sid:
+                    _lru_put(
+                        self._xmpp_sid_to_sender_jid,
+                        sid,
+                        f"{msg.muc_jid}/{msg.nick}",
                     )
-                    q.append(msg.stanza_id)
+                    if irc_client.has_echo_message:
+                        echo_key = (b.irc, b.irc_channel.lower())
+                        q = self._pending_echo_sids.setdefault(
+                            echo_key, collections.deque(maxlen=_NICK_MAP_SIZE)
+                        )
+                        q.append(sid)
 
         return handler
 
@@ -778,12 +851,9 @@ class Bridge:
             q = self._pending_echo_sids.get(echo_key)
             if q:
                 xmpp_sid = q.popleft()
-                self._irc_msgid_to_xmpp_sid[msgid] = xmpp_sid
-                if len(self._irc_msgid_to_xmpp_sid) > _NICK_MAP_SIZE:
-                    self._irc_msgid_to_xmpp_sid.popitem(last=False)
-                self._xmpp_sid_to_irc_msgid[xmpp_sid] = msgid
-                if len(self._xmpp_sid_to_irc_msgid) > _NICK_MAP_SIZE:
-                    self._xmpp_sid_to_irc_msgid.popitem(last=False)
+                irc_msgid = irc_ref(irc_name, channel, msgid)
+                _lru_put(self._irc_msgid_to_xmpp_sid, irc_msgid, xmpp_sid)
+                _lru_put(self._xmpp_sid_to_irc_msgid, xmpp_sid, irc_msgid)
 
         return handler
 
@@ -818,16 +888,22 @@ class Bridge:
         if not msg.reply_to_nick:
             return ""
 
+        reply_ref = (
+            xmpp_ref(xmpp_name, msg.muc_jid, msg.reply_to_id)
+            if xmpp_name and msg.reply_to_id
+            else None
+        )
+
         log.debug(
             "Reply lookup: reply_to_id=%s, known_ids=%s",
-            msg.reply_to_id,
+            reply_ref,
             list(self._msg_id_to_irc_nick.keys())[-5:],
         )
 
         # Resolve the target IRC nick
-        if msg.reply_to_id and msg.reply_to_id in self._msg_id_to_irc_nick:
+        if reply_ref and reply_ref in self._msg_id_to_irc_nick:
             # Replied-to message was bridged from IRC; use the real IRC nick
-            target = self._msg_id_to_irc_nick[msg.reply_to_id]
+            target = self._msg_id_to_irc_nick[reply_ref]
         else:
             target = msg.reply_to_nick
             # Puppet nicks are already real IRC users; only native XMPP users
@@ -845,9 +921,7 @@ class Bridge:
                 )
 
         style = self._setting(b, "reply_style")
-        cached_body = (
-            self._body_cache.get(msg.reply_to_id) if msg.reply_to_id else None
-        )
+        cached_body = self._body_cache.get(reply_ref) if reply_ref else None
         return _build_reply_prefix(target, style, cached_body)
 
     def _format_correction(self, text: str) -> str:
@@ -870,11 +944,14 @@ class Bridge:
         reply_prefix = self._format_reply_prefix(msg, irc_client, irc_cfg, b, xmpp_name)
 
         # Look up native IRC reply tag for XEP-0461 replies
-        irc_reply_to = (
-            self._xmpp_sid_to_irc_msgid.get(msg.reply_to_id)
-            if msg.reply_to_id
+        irc_reply_ref = (
+            self._xmpp_sid_to_irc_msgid.get(
+                xmpp_ref(xmpp_name, msg.muc_jid, msg.reply_to_id)
+            )
+            if xmpp_name and msg.reply_to_id
             else None
         )
+        irc_reply_to = irc_reply_ref.id if irc_reply_ref else None
 
         # Split into logical lines, then break any line that would overflow
         # the IRC line-length limit into byte-sized pieces. The pieces count
@@ -1026,13 +1103,10 @@ class Bridge:
             if not bridges:
                 return
 
-            # Update LRU state: irc_msgid → nick → current emoji set
-            if reply_to_msgid in self._irc_reaction_state:
-                self._irc_reaction_state.move_to_end(reply_to_msgid)
-            else:
-                if len(self._irc_reaction_state) >= _NICK_MAP_SIZE:
-                    self._irc_reaction_state.popitem(last=False)
-            nick_map = self._irc_reaction_state.setdefault(reply_to_msgid, {})
+            target = irc_ref(irc_name, channel, reply_to_msgid)
+            # Update LRU state: irc msgid ref → nick → current emoji set
+            _lru_touch(self._irc_reaction_state, target)
+            nick_map = self._irc_reaction_state.setdefault(target, {})
             current = nick_map.get(nick, set())
             if is_unreact:
                 current.discard(emoji)
@@ -1040,7 +1114,7 @@ class Bridge:
                 current.add(emoji)
             nick_map[nick] = current
 
-            xmpp_sid = self._irc_msgid_to_xmpp_sid.get(reply_to_msgid)
+            xmpp_sid = self._irc_msgid_to_xmpp_sid.get(target)
             if not xmpp_sid:
                 log.debug(
                     "No XMPP stanza-id for IRC reaction to msgid=%s, dropping",
@@ -1055,16 +1129,18 @@ class Bridge:
                     irc_cfg = self.config.irc_by_name(irc_name)
                     pjid = _puppet_jid(nick, irc_cfg.name, xmpp_cfg.component_domain)  # type: ignore[arg-type]
                     await component.send_puppet_reaction(
-                        b.xmpp_muc, pjid, xmpp_sid, frozenset(current)
+                        b.xmpp_muc, pjid, xmpp_sid.id, frozenset(current)
                     )
                 else:
                     xmpp_client = self.xmpp_clients[b.xmpp]
-                    await xmpp_client.send_reaction(b.xmpp_muc, xmpp_sid, frozenset(current))
+                    await xmpp_client.send_reaction(
+                        b.xmpp_muc, xmpp_sid.id, frozenset(current)
+                    )
 
         return handler
 
     def _format_reaction_text(
-        self, b: BridgeMapping, stanza_id_ref: str, emoji: str
+        self, b: BridgeMapping, stanza_ref: MsgRef, emoji: str
     ) -> str:
         """Build an IRC text body for a bridged XMPP reaction.
 
@@ -1075,7 +1151,7 @@ class Bridge:
         """
         style = self._setting(b, "reply_style")
         return _build_reaction_text(
-            emoji, style, self._body_cache.get(stanza_id_ref)
+            emoji, style, self._body_cache.get(stanza_ref)
         )
 
     def _make_xmpp_reaction_handler(self, xmpp_name: str):
@@ -1096,25 +1172,23 @@ class Bridge:
             if not bridges:
                 return
 
+            sid_ref = xmpp_ref(xmpp_name, muc_jid, stanza_id_ref)
             # Compute delta vs previously bridged state for this sender
-            if stanza_id_ref in self._xmpp_reaction_state:
-                self._xmpp_reaction_state.move_to_end(stanza_id_ref)
-            else:
-                if len(self._xmpp_reaction_state) >= _NICK_MAP_SIZE:
-                    self._xmpp_reaction_state.popitem(last=False)
-            state = self._xmpp_reaction_state.setdefault(stanza_id_ref, {})
+            _lru_touch(self._xmpp_reaction_state, sid_ref)
+            state = self._xmpp_reaction_state.setdefault(sid_ref, {})
             prev = state.get(nick, frozenset())
             added = emojis - prev
             state[nick] = emojis
 
-            irc_msgid = self._xmpp_sid_to_irc_msgid.get(stanza_id_ref)
+            irc_msgid_ref = self._xmpp_sid_to_irc_msgid.get(sid_ref)
+            irc_msgid = irc_msgid_ref.id if irc_msgid_ref else None
 
             for b in bridges:
                 irc_client = self.irc_clients[b.irc]
                 irc_cfg = self.config.irc_by_name(b.irc)
 
                 for emoji in added:
-                    text = self._format_reaction_text(b, stanza_id_ref, emoji)
+                    text = self._format_reaction_text(b, sid_ref, emoji)
                     await self._send_irc_line(
                         irc_client, irc_cfg, b.irc_channel, nick, text, b,
                         reply_to=irc_msgid,
@@ -1131,11 +1205,14 @@ class Bridge:
         b: BridgeMapping,
         xmpp_name: str | None = None,
     ) -> None:
-        irc_reply_to = (
-            self._xmpp_sid_to_irc_msgid.get(msg.reply_to_id)
-            if msg.reply_to_id
+        irc_reply_ref = (
+            self._xmpp_sid_to_irc_msgid.get(
+                xmpp_ref(xmpp_name, msg.muc_jid, msg.reply_to_id)
+            )
+            if xmpp_name and msg.reply_to_id
             else None
         )
+        irc_reply_to = irc_reply_ref.id if irc_reply_ref else None
         if irc_cfg.relaymsg and irc_client.can_relaymsg(channel):
             await irc_client.send_relaymsg(
                 channel,
