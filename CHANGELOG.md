@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0b1] - 2026-09-08
 
 ### Added
 - XEP-0092 Software Version: the bridge answers version queries as j2i (name, package version, OS) in both client and component mode. New `[settings]` flags `hide_version` (also applies to the XMPP resource and disco identity) and `hide_os` (XEP-0092 only)
