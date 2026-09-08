@@ -24,6 +24,9 @@ _NICK_MAP_SIZE = 500
 # Max characters in an inline reply excerpt shown on IRC
 _REPLY_QUOTE_MAX = 60
 
+# Max characters in a KICK reason originating from an XMPP ban
+_KICK_REASON_MAX = 80
+
 # Reserve (bytes) for the source prefix ":nick!user@host " that the server
 # prepends when relaying a message to other clients. It counts toward the
 # line-length limit but is not part of what we send, so we hold it back.
@@ -159,6 +162,22 @@ def _excerpt(body: str) -> str:
     text = body.replace("\n", " ").strip()
     if len(text) > _REPLY_QUOTE_MAX:
         text = text[: _REPLY_QUOTE_MAX - 1] + "…"
+    return text
+
+
+def _ban_kick_reason(reason: str | None, actor: str | None) -> str:
+    """Build a short IRC KICK reason for a synced XMPP puppet ban."""
+    if actor and reason:
+        text = f"Banned from XMPP ({actor}): {reason}"
+    elif reason:
+        text = f"Banned from XMPP: {reason}"
+    elif actor:
+        text = f"Banned from XMPP by {actor}"
+    else:
+        text = "Banned from XMPP MUC"
+    text = text.replace("\n", " ").strip()
+    if len(text) > _KICK_REASON_MAX:
+        text = text[: _KICK_REASON_MAX - 1] + "…"
     return text
 
 
@@ -319,6 +338,21 @@ class Bridge:
             return val
         return getattr(self.config.settings, name)
 
+    def _sync_bans(self, b: BridgeMapping) -> bool:
+        """Whether to sync XMPP puppet bans to IRC for this mapping.
+
+        Most specific wins: bridge > irc network > xmpp account > global.
+        """
+        if b.sync_bans is not None:
+            return b.sync_bans
+        irc_cfg = self.config.irc_by_name(b.irc)
+        if irc_cfg.sync_bans is not None:
+            return irc_cfg.sync_bans
+        xmpp_cfg = self.config.xmpp_by_name(b.xmpp)
+        if xmpp_cfg.sync_bans is not None:
+            return xmpp_cfg.sync_bans
+        return self.config.settings.sync_bans
+
     def _cache_body(self, ref: MsgRef, body: str) -> None:
         """Store a message body in the bounded reply-excerpt cache."""
         _lru_put(self._body_cache, ref, body)
@@ -444,6 +478,7 @@ class Bridge:
 
         for xmpp_name, component in self.xmpp_components.items():
             component.on_reconnected = self._make_xmpp_reconnect_handler(xmpp_name)
+            component.on_puppet_banned = self._make_puppet_banned_handler(xmpp_name)
 
     async def _connect_all(self) -> None:
         tasks: list[asyncio.Task] = []
@@ -763,6 +798,43 @@ class Bridge:
                     pjid = _puppet_jid(nick, irc_cfg.name, domain)
                     asyncio.create_task(
                         component.join_puppet(b.xmpp_muc, pjid, nick)
+                    )
+
+        return handler
+
+    def _make_puppet_banned_handler(self, xmpp_name: str):
+        """When a component puppet is banned in a MUC, +b and kick on IRC."""
+        async def handler(
+            muc_jid: str,
+            puppet_jid: str,
+            irc_nick: str,
+            reason: str | None,
+            actor: str | None,
+        ) -> None:
+            key = (xmpp_name, muc_jid.lower())
+            kick_reason = _ban_kick_reason(reason, actor)
+            for b in self._xmpp_to_bridges.get(key, []):
+                if not self._sync_bans(b):
+                    log.debug(
+                        "sync_bans off for %s ↔ %s, not banning %s",
+                        b.xmpp_muc, b.irc_channel, irc_nick,
+                    )
+                    continue
+                irc_client = self.irc_clients.get(b.irc)
+                if irc_client is None:
+                    continue
+                log.info(
+                    "Syncing XMPP ban of %s (%s) to %s on %s",
+                    puppet_jid, irc_nick, b.irc_channel, b.irc,
+                )
+                try:
+                    await irc_client.ban_and_kick(
+                        b.irc_channel, irc_nick, kick_reason
+                    )
+                except Exception as e:
+                    log.warning(
+                        "Failed to sync ban of %s to %s on %s: %s",
+                        irc_nick, b.irc_channel, b.irc, e,
                     )
 
         return handler

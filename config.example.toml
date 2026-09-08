@@ -34,6 +34,10 @@ nick = "IRC Bridge"
 # Leave unset to use the bundled default avatar; set to "" to disable entirely.
 # avatar = "/etc/j2i/bot-avatar.png"
 
+# When a puppet is banned in a MUC, +b and kick the corresponding IRC nick.
+# None/unset defers to [settings].sync_bans. See that option for full notes.
+# sync_bans = true
+
 # --- Component-mode example ---
 # [[xmpp]]
 # name = "mycomponent"
@@ -78,6 +82,11 @@ relaymsg = true
 # fallback). Overrides the global settings.max_line_bytes for this network.
 # max_line_bytes = 900
 
+# Per-network override of sync_bans. None/unset defers to the XMPP account
+# or [settings]. Useful when this network's bot has no ops, or you do not
+# want XMPP bans to touch real IRC nicks here.
+# sync_bans = false
+
 # ==============================================================================
 # Bridge mappings
 # ==============================================================================
@@ -104,6 +113,7 @@ irc_channel = "#offtopic"
 # pastebin_auth = "Bearer mytoken"
 # pastebin_field = "txt"
 # reply_style = "ping"
+# sync_bans = true
 
 # ==============================================================================
 # General settings
@@ -170,3 +180,13 @@ relaymsg_suffix = "xmpp"
 # as an admin switch; resource and disco never include the OS).
 # hide_version = false
 # hide_os = false
+
+# When a component-mode puppet is banned in an XMPP MUC (affiliation outcast,
+# status 301), set +b nick!*@* on the corresponding IRC nick and kick them.
+# Only live bans of puppets currently in the MUC are synced; kicks-without-ban,
+# unbans, and IRC→XMPP bans are not. The IRC bot needs permission to +b/kick;
+# missing ops are logged and otherwise ignored. Off by default because this
+# is destructive and some rooms want to ban a puppet without touching IRC.
+# Override per [[xmpp]], [[irc]], or [[bridge]]; most specific wins
+# (bridge > irc network > xmpp account > global).
+# sync_bans = false

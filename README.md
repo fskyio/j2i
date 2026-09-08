@@ -6,6 +6,7 @@ A bridge between XMPP MUCs and IRC channels. Supports both basic plumbing (bot r
 
 - **Basic plumbing mode** - bridge bot relays messages in `<nick> text` format, works with any XMPP and IRC server
 - **Puppeteering** - XMPP users appear on IRC with their real nick via [RELAYMSG](https://raw.githubusercontent.com/ircv3/ircv3-specifications/66233655658dce029fc2a5184a0ab97201a4ceec/extensions/relaymsg.md); IRC users appear in XMPP MUCs as puppet JIDs via [XEP-0114 component](https://xmpp.org/extensions/xep-0114.html)
+- **Ban syncing** - optional: when a component puppet is banned in a MUC, the corresponding IRC nick is given `+b` and kicked. Off by default (`sync_bans`)
 - **Smart replies** - XEP-0461 replies from XMPP become `nick: ` mentions or quoted on IRC; IRCv3 reply tags are preserved
 - **Reactions** - XMPP reactions (XEP-0444) are relayed to IRC as attributed text; IRC `+draft/react`/`+draft/unreact` tags are bridged natively to XMPP reactions
 - **Message edits** - XEP-0308 corrections are relayed to IRC as `* corrected text`
@@ -119,6 +120,8 @@ Set `component = false` in `[[xmpp]]` and `relaymsg = false` in `[[irc]]`. The b
 **IRC side:** Set `relaymsg = true` in `[[irc]]`. The IRC bot must have operator status (`+o`) in the channel. The bridge detects RELAYMSG support on connect and falls back to basic plumbing mode if unavailable.
 
 **XMPP side:** Set `component = true` in `[[xmpp]]` and configure your XMPP server with a component subdomain. Each IRC user will appear in the MUC as a puppet JID under that domain (e.g. `johndoe.libera@irc.example.org`). Puppet nicks on IRC get a `/xmpp` suffix (e.g. `alice/xmpp`) to distinguish them from real IRC users.
+
+Optional `sync_bans` (global, or per `[[xmpp]]` / `[[irc]]` / `[[bridge]]`) forwards a live MUC ban of a puppet to IRC as `MODE +b nick!*@*` plus `KICK`. The IRC bot needs channel operator status; if it does not have it, the failure is logged and ignored. Kicks-without-ban, unbans, and IRC→XMPP bans are not synced.
 
 ## Support chatroom
 If you want to ask anything or need assistance with j2i, we have a public chatroom on XMPP and IRC.

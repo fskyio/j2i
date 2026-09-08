@@ -16,8 +16,39 @@ from j2i.xmpp.client import (
 )
 
 ReconnectedCallback = Callable[[], Awaitable[None]]
+# muc_jid, puppet_jid, irc_nick, reason, actor
+PuppetBannedCallback = Callable[
+    [str, str, str, str | None, str | None], Awaitable[None]
+]
 
 log = logging.getLogger(__name__)
+
+_NS_MUC_USER = "http://jabber.org/protocol/muc#user"
+
+
+def _muc_user_info(
+    xml,
+) -> tuple[set[str], str | None, str | None]:
+    """Parse muc#user status codes, ban reason, and actor from a presence XML."""
+    muc_x = xml.find(f"{{{_NS_MUC_USER}}}x")
+    if muc_x is None:
+        return set(), None, None
+    codes = {
+        s.get("code")
+        for s in muc_x.findall(f"{{{_NS_MUC_USER}}}status")
+        if s.get("code")
+    }
+    item = muc_x.find(f"{{{_NS_MUC_USER}}}item")
+    reason = None
+    actor = None
+    if item is not None:
+        reason_el = item.find(f"{{{_NS_MUC_USER}}}reason")
+        if reason_el is not None and reason_el.text:
+            reason = reason_el.text.strip() or None
+        actor_el = item.find(f"{{{_NS_MUC_USER}}}actor")
+        if actor_el is not None:
+            actor = actor_el.get("nick") or actor_el.get("jid") or None
+    return codes, reason, actor
 
 
 def _collision_nick(nick: str, puppet_jid: str) -> str:
@@ -64,6 +95,9 @@ class XMPPComponent:
         # muc_jid.lower() -> {puppet_jid -> actual_muc_nick}
         # The actual nick may differ from the IRC nick after a collision.
         self._puppet_nicks: dict[str, dict[str, str]] = {}
+        # muc_jid.lower() -> {puppet_jid -> original IRC nick}
+        # Preserved across MUC nick collisions so bans can target the real nick.
+        self._puppet_irc_nicks: dict[str, dict[str, str]] = {}
 
         # Same callback interface as XMPPClient
         self.on_message: MessageCallback | None = None
@@ -71,6 +105,7 @@ class XMPPComponent:
         self.on_typing: TypingCallback | None = None
         self.on_reaction: ReactionCallback | None = None
         self.on_reconnected: ReconnectedCallback | None = None
+        self.on_puppet_banned: PuppetBannedCallback | None = None
 
         self._xmpp = slixmpp.ComponentXMPP(
             component_domain, password, component_host, component_port
@@ -215,8 +250,24 @@ class XMPPComponent:
         )
         stanza.send()
         # Optimistically track the nick; _on_presence_error handles conflict
-        self._puppet_nicks.setdefault(muc_key, {})[puppet_jid] = nick
+        self._track_puppet(muc_key, puppet_jid, irc_nick=nick, muc_nick=nick)
         log.debug("Puppet %s joining %s as %r", puppet_jid, muc_jid, nick)
+
+    def _track_puppet(
+        self, muc_key: str, puppet_jid: str, irc_nick: str, muc_nick: str
+    ) -> None:
+        self._puppet_nicks.setdefault(muc_key, {})[puppet_jid] = muc_nick
+        self._puppet_irc_nicks.setdefault(muc_key, {})[puppet_jid] = irc_nick
+
+    def _untrack_puppet(self, muc_key: str, puppet_jid: str) -> str | None:
+        """Drop a puppet from tracking. Returns the original IRC nick, if known."""
+        nicks = self._puppet_nicks.get(muc_key)
+        if nicks is not None:
+            nicks.pop(puppet_jid, None)
+        irc_nicks = self._puppet_irc_nicks.get(muc_key)
+        if irc_nicks is None:
+            return None
+        return irc_nicks.pop(puppet_jid, None)
 
     async def _voice_puppet(self, muc_jid: str, nick: str) -> None:
         """Grant voice (role=participant) to a puppet in a MUC.
@@ -248,7 +299,7 @@ class XMPPComponent:
                 ptype="unavailable",
             )
             pres.send()
-            del self._puppet_nicks[muc_key][puppet_jid]
+            self._untrack_puppet(muc_key, puppet_jid)
             log.debug("Puppet %s left %s", puppet_jid, muc_jid)
         except Exception as e:
             log.warning(
@@ -400,12 +451,13 @@ class XMPPComponent:
         log.warning("XMPP component disconnected, reconnecting...")
         self._connected.clear()
         self._puppet_nicks.clear()
+        self._puppet_irc_nicks.clear()
         self._reconnecting = True
         await asyncio.sleep(2)
         self._xmpp.connect()
 
     def _filter_presence_errors(self, stanza) -> object:
-        """Input filter: handle puppet nick conflicts, master kicks, and auto-voice."""
+        """Input filter: puppet conflicts, kicks/bans, master kicks, auto-voice."""
         if not isinstance(stanza, slixmpp.Presence):
             return stanza
 
@@ -417,14 +469,8 @@ class XMPPComponent:
 
         # Master kicked or banned from MUC
         elif stanza["type"] == "unavailable" and to_bare == self._master_jid:
-            muc_x = stanza.xml.find("{http://jabber.org/protocol/muc#user}x")
-            if muc_x is not None:
-                codes = {
-                    s.get("code")
-                    for s in muc_x.findall(
-                        "{http://jabber.org/protocol/muc#user}status"
-                    )
-                }
+            codes, _, _ = _muc_user_info(stanza.xml)
+            if codes:
                 muc_jid = str(stanza["from"].bare)
                 if "307" in codes:
                     log.warning(
@@ -434,6 +480,10 @@ class XMPPComponent:
                 elif "301" in codes:
                     log.warning("Master JID banned from %s, not rejoining", muc_jid)
 
+        # Puppet kicked or banned from MUC (presence addressed to the puppet)
+        elif stanza["type"] == "unavailable" and to_bare != self._master_jid:
+            self._on_puppet_unavailable(stanza)
+
         # Auto-voice: grant voice to puppets that have role=visitor
         # This fires on puppet join to moderated rooms AND when a room
         # becomes moderated while puppets are already in it.
@@ -442,13 +492,40 @@ class XMPPComponent:
             muc_jid = str(stanza["from"].bare)
             muc_key = muc_jid.lower()
             if nick and self._is_puppet_echo(muc_key, nick):
-                muc_x = stanza.xml.find("{http://jabber.org/protocol/muc#user}x")
+                muc_x = stanza.xml.find(f"{{{_NS_MUC_USER}}}x")
                 if muc_x is not None:
-                    item = muc_x.find("{http://jabber.org/protocol/muc#user}item")
+                    item = muc_x.find(f"{{{_NS_MUC_USER}}}item")
                     if item is not None and item.get("role") == "visitor":
                         asyncio.ensure_future(self._voice_puppet(muc_jid, nick))
 
         return stanza
+
+    def _on_puppet_unavailable(self, pres: slixmpp.Presence) -> None:
+        """Handle a puppet's own unavailable presence (kick/ban/leave echo)."""
+        puppet_jid = str(pres["to"].bare)
+        muc_jid = str(pres["from"].bare)
+        muc_key = muc_jid.lower()
+        if puppet_jid not in self._puppet_nicks.get(muc_key, {}):
+            return
+
+        codes, reason, actor = _muc_user_info(pres.xml)
+        if "301" in codes:
+            irc_nick = self._untrack_puppet(muc_key, puppet_jid)
+            log.warning(
+                "Puppet %s (%s) banned from %s", puppet_jid, irc_nick, muc_jid
+            )
+            if irc_nick and self.on_puppet_banned:
+                asyncio.ensure_future(
+                    self.on_puppet_banned(
+                        muc_jid, puppet_jid, irc_nick, reason, actor
+                    )
+                )
+        elif "307" in codes:
+            irc_nick = self._untrack_puppet(muc_key, puppet_jid)
+            log.info(
+                "Puppet %s (%s) kicked from %s, not rejoining",
+                puppet_jid, irc_nick, muc_jid,
+            )
 
     async def _rejoin_after_kick(self, muc_jid: str) -> None:
         await asyncio.sleep(5)
@@ -490,7 +567,7 @@ class XMPPComponent:
                     "Could not join puppet %s to %s: both nick attempts failed",
                     puppet_jid, muc_jid,
                 )
-                del self._puppet_nicks[muc_key][puppet_jid]
+                self._untrack_puppet(muc_key, puppet_jid)
                 return
 
             log.info(
@@ -514,7 +591,7 @@ class XMPPComponent:
             "Puppet %s failed to join %s (nick %r): %s",
             puppet_jid, muc_jid, tried_nick, err_type,
         )
-        del self._puppet_nicks[muc_key][puppet_jid]
+        self._untrack_puppet(muc_key, puppet_jid)
 
     def _is_puppet_echo(self, muc_key: str, nick: str) -> bool:
         return nick in self._puppet_nicks.get(muc_key, {}).values()

@@ -9,6 +9,14 @@ from typing import Callable, Awaitable
 
 log = logging.getLogger(__name__)
 
+# Numerics that commonly follow a MODE +b / KICK the bot wasn't allowed to do.
+_CHANOP_ERRORS = {
+    "441": "user not in channel",
+    "472": "unknown mode",
+    "478": "ban list full",
+    "482": "not channel operator",
+}
+
 
 def _redact_for_log(line: str) -> str:
     """Mask credentials in an outbound IRC line before it is logged.
@@ -275,6 +283,14 @@ class IRCClient:
         value = "active" if active else "done"
         await self._send(f"@+typing={value} TAGMSG {channel}")
 
+    async def ban_and_kick(
+        self, channel: str, nick: str, reason: str | None = None
+    ) -> None:
+        """Set +b nick!*@* then KICK. Failures surface as server numerics."""
+        await self._send(f"MODE {channel} +b {nick}!*@*")
+        kick_reason = reason or "Banned from XMPP MUC"
+        await self._send(f"KICK {channel} {nick} :{kick_reason}")
+
     async def _send(self, line: str) -> None:
         if self._writer is None:
             log.warning("Cannot send, not connected: %s", line)
@@ -373,6 +389,12 @@ class IRCClient:
 
         elif command == "KICK":
             await self._handle_kick(params)
+
+        elif command in _CHANOP_ERRORS:
+            detail = " ".join(params[1:]) if len(params) > 1 else " ".join(params)
+            log.warning(
+                "IRC %s (%s): %s", command, _CHANOP_ERRORS[command], detail
+            )
 
         elif command == "353":
             self._handle_names(params)

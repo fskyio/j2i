@@ -18,6 +18,8 @@ class XMPPConfig:
     # Bot avatar: a local file path or http(s) URL. None = use the bundled
     # default; "" (empty string) = explicitly no avatar.
     avatar: str | None = None
+    # Sync XMPP puppet bans to IRC (+b and kick). None = defer to global.
+    sync_bans: bool | None = None
 
 
 @dataclass
@@ -34,6 +36,8 @@ class IRCConfig:
     # Override the line-length ceiling (bytes) for this network. None/0 = defer
     # to the global setting, else auto-detect from ISUPPORT LINELEN.
     max_line_bytes: int | None = None
+    # Sync XMPP puppet bans to IRC (+b and kick). None = defer to XMPP/global.
+    sync_bans: bool | None = None
 
 
 @dataclass
@@ -51,6 +55,8 @@ class BridgeMapping:
     pastebin_field: str | None = None
     # Reply style: "quote" (inline excerpt) or "ping" (nick mention only)
     reply_style: str | None = None
+    # Sync XMPP puppet bans to IRC (+b and kick). None = defer to irc/xmpp/global.
+    sync_bans: bool | None = None
 
 
 @dataclass
@@ -79,6 +85,10 @@ class Settings:
     hide_version: bool = False
     # Omit OS from XEP-0092 replies (resource/disco never include it).
     hide_os: bool = False
+    # When a component puppet is banned in a MUC (status 301), set +b on the
+    # corresponding IRC nick and kick them. Off by default; override per
+    # [[xmpp]], [[irc]], or [[bridge]] (most specific wins).
+    sync_bans: bool = False
 
 
 @dataclass

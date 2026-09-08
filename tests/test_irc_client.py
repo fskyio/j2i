@@ -1,6 +1,7 @@
 """Unit tests for IRCClient ISUPPORT parsing relevant to line-length handling."""
 
 import asyncio
+import logging
 
 from j2i.irc.client import IRCClient
 
@@ -39,3 +40,47 @@ class TestLineLen:
         _isupport(client, "UTF8ONLY", "NICKLEN=30")
         assert client.line_len == 512
         assert client.has_utf8only is True
+
+
+class TestBanAndKick:
+    def test_mode_then_kick(self):
+        client = _client()
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        asyncio.run(client.ban_and_kick("#general", "alice", "Banned from XMPP MUC"))
+        assert sent == [
+            "MODE #general +b alice!*@*",
+            "KICK #general alice :Banned from XMPP MUC",
+        ]
+
+    def test_default_reason_when_none(self):
+        client = _client()
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        asyncio.run(client.ban_and_kick("#c", "bob", None))
+        assert sent[1] == "KICK #c bob :Banned from XMPP MUC"
+
+
+class TestChanopErrors:
+    def test_logs_482(self, caplog):
+        client = _client()
+        with caplog.at_level(logging.WARNING, logger="j2i.irc.client"):
+            asyncio.run(
+                client._dispatch(
+                    {},
+                    "irc.example.org",
+                    "482",
+                    ["bridge", "#c", "You're not a channel operator"],
+                )
+            )
+        assert "482" in caplog.text
+        assert "not channel operator" in caplog.text
+        assert "#c" in caplog.text
