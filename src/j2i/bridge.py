@@ -9,12 +9,13 @@ from typing import TypeVar
 
 from j2i.config import Config, BridgeMapping, IRCConfig, resolve_puppet_mode, resolve_puppet_presence
 from j2i.irc.client import IRCClient, IRCMessage
-from j2i.irc.nicks import sanitize_irc_nick
+from j2i.irc.nicks import casemap_nick, sanitize_irc_nick
 from j2i.irc.puppets import IrcPuppetPool
 from j2i.pastebin import upload as pastebin_upload
 from j2i.xmpp.avatar import Avatar, default_avatar_path
 from j2i.xmpp.client import XMPPClient, XMPPMessage
 from j2i.xmpp.component import XMPPComponent
+from j2i.xmpp.mentions import MentionTarget, rewrite_irc_mentions, shift_mentions
 from j2i.xmpp.presence import OccupantEvent
 
 log = logging.getLogger(__name__)
@@ -409,6 +410,88 @@ class Bridge:
     def _puppet_presence(self, irc_cfg: IRCConfig) -> str:
         return resolve_puppet_presence(irc_cfg, self.config.settings)
 
+    def _xmpp_nick_on_irc(
+        self, irc_cfg: IRCConfig, irc_client: IRCClient, xmpp_nick: str
+    ) -> str:
+        """IRC-facing nick for an XMPP occupant (puppet, RELAYMSG, or raw)."""
+        mode = self._puppet_mode(irc_cfg)
+        use_nicks = mode == "nicks" or (
+            mode == "auto"
+            and not (irc_cfg.relaymsg and irc_client.has_relaymsg)
+        )
+        if use_nicks and self.puppet_pool is not None:
+            return self.puppet_pool.display_nick(irc_cfg.name, xmpp_nick)
+        if irc_cfg.relaymsg and irc_client.has_relaymsg:
+            return _relaymsg_nick(
+                xmpp_nick,
+                irc_client.relaymsg_separator,
+                irc_client.relaymsg_suffix,
+            )
+        return xmpp_nick
+
+    def _occupant_mention(
+        self, xmpp_name: str, muc_jid: str, nick: str
+    ) -> tuple[str, str | None]:
+        """Return (occupant JID, occupant id or None) for a MUC nick."""
+        occupant_jid = f"{muc_jid}/{nick}"
+        xmpp = self.xmpp_clients.get(xmpp_name)
+        oid = xmpp.occupant_id(muc_jid, nick) if xmpp is not None else None
+        return occupant_jid, oid
+
+    def _mention_targets(
+        self,
+        b: BridgeMapping,
+        irc_name: str,
+        channel: str,
+        sender: str,
+    ) -> tuple[dict[str, MentionTarget], str]:
+        """Casemapped IRC tokens to mention, plus extra token chars (RELAYMSG)."""
+        irc_client = self.irc_clients.get(irc_name)
+        irc_cfg = self.config.irc_by_name(irc_name)
+        mapping = irc_client.casemapping if irc_client is not None else "ascii"
+        extra = ""
+        if irc_client is not None and irc_client.has_relaymsg:
+            extra = irc_client.relaymsg_separator
+        targets: dict[str, MentionTarget] = {}
+        skip = casemap_nick(sender, mapping)
+
+        occupants = self._xmpp_occupants.get((b.xmpp, b.xmpp_muc.lower()), set())
+        for xmpp_nick in occupants:
+            if irc_client is not None:
+                irc_nick = self._xmpp_nick_on_irc(irc_cfg, irc_client, xmpp_nick)
+            else:
+                irc_nick = xmpp_nick
+            key = casemap_nick(irc_nick, mapping)
+            if key == skip:
+                continue
+            jid, oid = self._occupant_mention(b.xmpp, b.xmpp_muc, xmpp_nick)
+            targets[key] = MentionTarget(
+                fallback=xmpp_nick, occupant_jid=jid, occupant_id=oid,
+            )
+
+        if b.xmpp in self.xmpp_components and irc_client is not None:
+            component = self.xmpp_components[b.xmpp]
+            xmpp_cfg = self.config.xmpp_by_name(b.xmpp)
+            domain = xmpp_cfg.component_domain
+            if domain:
+                for irc_nick in irc_client.get_members(channel):
+                    if self._owned_irc_nick(irc_name, irc_nick):
+                        continue
+                    key = casemap_nick(irc_nick, mapping)
+                    if key == skip:
+                        continue
+                    pjid = _puppet_jid(irc_nick, irc_cfg.name, domain)
+                    muc_nick = component._puppet_nicks.get(
+                        b.xmpp_muc.lower(), {}
+                    ).get(pjid, irc_nick)
+                    jid, oid = self._occupant_mention(
+                        b.xmpp, b.xmpp_muc, muc_nick
+                    )
+                    targets[key] = MentionTarget(
+                        fallback=muc_nick, occupant_jid=jid, occupant_id=oid,
+                    )
+        return targets, extra
+
     async def _maybe_puppet(
         self,
         irc_cfg: IRCConfig,
@@ -699,8 +782,17 @@ class Bridge:
                 else None
             )
             relay_text = self._strip_reply_prefix(text, xmpp_sid) if xmpp_sid else text
+            targets, extra = self._mention_targets(b, irc_name, channel, nick)
+            irc_client = self.irc_clients.get(irc_name)
+            mapping = (
+                irc_client.casemapping if irc_client is not None else "ascii"
+            )
+            relay_text, mentions = rewrite_irc_mentions(
+                relay_text, targets, mapping=mapping, extra_chars=extra,
+            )
             if irc_msg.is_action:
                 puppet_body = f"/me {relay_text}"
+                mentions = shift_mentions(mentions, 4)
             else:
                 puppet_body = relay_text
 
@@ -713,10 +805,12 @@ class Bridge:
                     msg_id = await component.send_puppet_reply(
                         b.xmpp_muc, pjid, puppet_body, xmpp_sid.id,
                         reply_to=reply_to_sender,
+                        mentions=mentions or None,
                     )
                 else:
                     msg_id = await component.send_puppet_message(
                         b.xmpp_muc, pjid, puppet_body,
+                        mentions=mentions or None,
                     )
                 if not msg_id:
                     continue
@@ -740,15 +834,19 @@ class Bridge:
                     plumbing_body = f"* {display_nick} {relay_text}"
                 else:
                     plumbing_body = f"<{display_nick}> {relay_text}"
+                prefix_len = len(plumbing_body) - len(relay_text)
+                plumbing_mentions = shift_mentions(mentions, prefix_len)
                 await xmpp_client.send_typing(b.xmpp_muc, False)
                 if xmpp_sid:
                     msg_id = await xmpp_client.send_reply(
                         b.xmpp_muc, plumbing_body, xmpp_sid.id,
                         reply_to=reply_to_sender,
+                        mentions=plumbing_mentions or None,
                     )
                 else:
                     msg_id = await xmpp_client.send_message(
-                        b.xmpp_muc, plumbing_body
+                        b.xmpp_muc, plumbing_body,
+                        mentions=plumbing_mentions or None,
                     )
                 cid = xmpp_ref(b.xmpp, b.xmpp_muc, msg_id)
                 self._record_msg_id(cid, nick)
@@ -1252,19 +1350,7 @@ class Bridge:
             else:
                 is_native = True
             if is_native:
-                mode = self._puppet_mode(irc_cfg)
-                use_nicks = mode == "nicks" or (
-                    mode == "auto"
-                    and not (irc_cfg.relaymsg and irc_client.has_relaymsg)
-                )
-                if use_nicks and self.puppet_pool is not None:
-                    target = self.puppet_pool.display_nick(irc_cfg.name, target)
-                elif irc_cfg.relaymsg and irc_client.has_relaymsg:
-                    target = _relaymsg_nick(
-                        target,
-                        irc_client.relaymsg_separator,
-                        irc_client.relaymsg_suffix,
-                    )
+                target = self._xmpp_nick_on_irc(irc_cfg, irc_client, target)
 
         style = self._setting(b, "reply_style")
         cached_body = self._body_cache.get(reply_ref) if reply_ref else None

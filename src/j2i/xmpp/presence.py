@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _NS_MUC_USER = "http://jabber.org/protocol/muc#user"
+_NS_OCCUPANT_ID = "urn:xmpp:occupant-id:0"
 _AWAY_SHOWS = frozenset({"away", "xa", "dnd"})
 
 
@@ -20,6 +21,68 @@ class OccupantEvent:
     status_codes: frozenset[str] = frozenset()
     reason: str | None = None
     actor: str | None = None
+    occupant_id: str | None = None
+
+
+def extract_occupant_id(xml) -> str | None:
+    """Return the XEP-0421 occupant id from a stanza XML, or None."""
+    if xml is None:
+        return None
+    el = xml.find(f"{{{_NS_OCCUPANT_ID}}}occupant-id")
+    if el is None:
+        return None
+    oid = el.get("id")
+    return oid or None
+
+
+class OccupantIdStore:
+    """Per-MUC nick → occupant-id map, gated on disco for XEP-0421.
+
+    Ids are recorded whenever a stanza carries them, but ``get`` only
+    returns a value after the room has advertised ``urn:xmpp:occupant-id:0``.
+    Forged ids in rooms that do not implement 0421 are therefore ignored.
+    """
+
+    def __init__(self) -> None:
+        self._ids: dict[str, dict[str, str]] = {}
+        self._supported: dict[str, bool] = {}
+
+    def set_supported(self, muc_jid: str, supported: bool) -> None:
+        self._supported[muc_jid.lower()] = supported
+
+    def remember(self, muc_jid: str, nick: str, occupant_id: str | None) -> None:
+        if not nick or not occupant_id:
+            return
+        self._ids.setdefault(muc_jid.lower(), {})[nick] = occupant_id
+
+    def forget(self, muc_jid: str, nick: str) -> None:
+        ids = self._ids.get(muc_jid.lower())
+        if ids is not None:
+            ids.pop(nick, None)
+
+    def rename(self, muc_jid: str, old_nick: str, new_nick: str) -> None:
+        ids = self._ids.get(muc_jid.lower())
+        if not ids or old_nick not in ids:
+            return
+        ids[new_nick] = ids.pop(old_nick)
+
+    def apply_event(self, event: OccupantEvent) -> None:
+        if event.kind == "leave":
+            self.forget(event.muc_jid, event.nick)
+        elif event.kind == "nick" and event.new_nick:
+            self.rename(event.muc_jid, event.nick, event.new_nick)
+            self.remember(event.muc_jid, event.new_nick, event.occupant_id)
+        elif event.kind == "join":
+            self.remember(event.muc_jid, event.nick, event.occupant_id)
+
+    def get(self, muc_jid: str, nick: str) -> str | None:
+        if not self._supported.get(muc_jid.lower()):
+            return None
+        return self._ids.get(muc_jid.lower(), {}).get(nick)
+
+    def clear(self) -> None:
+        self._ids.clear()
+        self._supported.clear()
 
 
 def muc_user_info(
@@ -61,6 +124,7 @@ def parse_occupant_event(
     status: str = "",
     reason: str | None = None,
     actor: str | None = None,
+    occupant_id: str | None = None,
 ) -> OccupantEvent | None:
     """Classify a MUC presence as join, leave, or nick-change.
 
@@ -81,6 +145,7 @@ def parse_occupant_event(
                 is_self=is_self,
                 new_nick=item_nick,
                 status_codes=code_set,
+                occupant_id=occupant_id,
             )
         return OccupantEvent(
             muc_jid=muc_jid,
@@ -90,6 +155,7 @@ def parse_occupant_event(
             status_codes=code_set,
             reason=reason,
             actor=actor,
+            occupant_id=occupant_id,
         )
 
     if ptype in ("", "available"):
@@ -103,6 +169,7 @@ def parse_occupant_event(
             is_self=is_self,
             away_reason=away_reason,
             status_codes=code_set,
+            occupant_id=occupant_id,
         )
 
     return None
@@ -125,4 +192,5 @@ def occupant_event_from_presence(pres, self_nick: str) -> OccupantEvent | None:
         status=pres["status"] or "",
         reason=reason,
         actor=actor,
+        occupant_id=extract_occupant_id(pres.xml),
     )

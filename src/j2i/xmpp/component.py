@@ -11,10 +11,14 @@ import slixmpp
 from j2i.xmpp.avatar import Avatar
 from j2i.xmpp.client import (
     XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback,
-    ReactionCallback, OccupantCallback, _NS_REACTIONS, _NS_HINTS,
+    ReactionCallback, OccupantCallback, _NS_REACTIONS, _NS_HINTS, _NS_MENTIONS,
     configure_software_identity, extract_stanza_id, incoming_xmpp_message,
 )
-from j2i.xmpp.presence import OccupantEvent, muc_user_info, occupant_event_from_presence
+from j2i.xmpp.mentions import Mention, attach_mentions
+from j2i.xmpp.presence import (
+    OccupantEvent, OccupantIdStore, extract_occupant_id, muc_user_info,
+    occupant_event_from_presence,
+)
 
 ReconnectedCallback = Callable[[], Awaitable[None]]
 # muc_jid, puppet_jid, irc_nick, reason, actor
@@ -82,6 +86,7 @@ class XMPPComponent:
         # muc_jid.lower() -> {puppet_jid -> original IRC nick}
         # Preserved across MUC nick collisions so bans can target the real nick.
         self._puppet_irc_nicks: dict[str, dict[str, str]] = {}
+        self._occupant_ids = OccupantIdStore()
 
         # Same callback interface as XMPPClient
         self.on_message: MessageCallback | None = None
@@ -100,6 +105,7 @@ class XMPPComponent:
         self._xmpp.register_plugin("xep_0085")
         self._xmpp.register_plugin("xep_0199")
         self._xmpp.register_plugin("xep_0308")
+        self._xmpp.register_plugin("xep_0421")
         self._xmpp.register_plugin("xep_0444")
         self._xmpp.register_plugin("xep_0461")
         configure_software_identity(
@@ -109,6 +115,7 @@ class XMPPComponent:
             identity_category="gateway",
             identity_type="irc",
         )
+        self._xmpp["xep_0030"].add_feature(_NS_MENTIONS)
 
         self._xmpp.add_event_handler("session_start", self._on_session_start)
         self._xmpp.add_event_handler("disconnected", self._on_disconnected)
@@ -143,6 +150,26 @@ class XMPPComponent:
 
     def add_muc(self, muc_jid: str) -> None:
         self._mucs.append(muc_jid)
+
+    def occupant_id(self, muc_jid: str, nick: str) -> str | None:
+        """XEP-0421 occupant id if the room advertised support and we have one."""
+        return self._occupant_ids.get(muc_jid, nick)
+
+    def _remember_occupant_id(self, muc_jid: str, nick: str, xml) -> None:
+        if nick:
+            self._occupant_ids.remember(muc_jid, nick, extract_occupant_id(xml))
+
+    async def _probe_occupant_ids(self, muc_jid: str) -> None:
+        try:
+            supported = await self._xmpp["xep_0421"].has_feature(
+                slixmpp.JID(muc_jid), ifrom=self._master_jid,
+            )
+        except Exception as e:
+            log.debug("Occupant-id disco for %s failed: %s", muc_jid, e)
+            supported = False
+        self._occupant_ids.set_supported(muc_jid, supported)
+        if supported:
+            log.debug("MUC %s advertises XEP-0421 occupant ids", muc_jid)
 
     def is_puppet_nick(self, muc_jid: str, nick: str) -> bool:
         """Return True if nick is an IRC puppet in the given MUC."""
@@ -247,8 +274,11 @@ class XMPPComponent:
     def _untrack_puppet(self, muc_key: str, puppet_jid: str) -> str | None:
         """Drop a puppet from tracking. Returns the original IRC nick, if known."""
         nicks = self._puppet_nicks.get(muc_key)
+        muc_nick = None
         if nicks is not None:
-            nicks.pop(puppet_jid, None)
+            muc_nick = nicks.pop(puppet_jid, None)
+        if muc_nick:
+            self._occupant_ids.forget(muc_key, muc_nick)
         irc_nicks = self._puppet_irc_nicks.get(muc_key)
         if irc_nicks is None:
             return None
@@ -302,7 +332,11 @@ class XMPPComponent:
         return False
 
     async def send_puppet_message(
-        self, muc_jid: str, puppet_jid: str, text: str
+        self,
+        muc_jid: str,
+        puppet_jid: str,
+        text: str,
+        mentions: list[Mention] | None = None,
     ) -> str:
         """Send a groupchat message from a puppet JID. Returns client msg_id."""
         if not self._ensure_puppet_joined(muc_jid, puppet_jid):
@@ -313,6 +347,8 @@ class XMPPComponent:
             mbody=text,
             mtype="groupchat",
         )
+        if mentions:
+            attach_mentions(msg, mentions)
         msg["chat_state"] = "active"
         msg_id = msg["id"]
         msg.send()
@@ -325,8 +361,13 @@ class XMPPComponent:
         return await self.send_puppet_message(muc_jid, puppet_jid, f"/me {text}")
 
     async def send_puppet_reply(
-        self, muc_jid: str, puppet_jid: str, text: str, reply_to_id: str,
+        self,
+        muc_jid: str,
+        puppet_jid: str,
+        text: str,
+        reply_to_id: str,
         reply_to: str | None = None,
+        mentions: list[Mention] | None = None,
     ) -> str:
         """Send a groupchat reply (XEP-0461) from a puppet JID. Returns client msg_id."""
         if not self._ensure_puppet_joined(muc_jid, puppet_jid):
@@ -340,6 +381,8 @@ class XMPPComponent:
         msg["reply"]["id"] = reply_to_id
         if reply_to:
             msg["reply"]["to"] = reply_to
+        if mentions:
+            attach_mentions(msg, mentions)
         msg["chat_state"] = "active"
         msg_id = msg["id"]
         msg.send()
@@ -422,6 +465,7 @@ class XMPPComponent:
                     maxstanzas=0,
                 )
                 log.info("Component master joined XMPP MUC: %s", room)
+                await self._probe_occupant_ids(room)
             except Exception as e:
                 log.warning("Failed to join MUC %s: %s", room, e)
         is_reconnect = self._reconnecting
@@ -437,6 +481,7 @@ class XMPPComponent:
         self._connected.clear()
         self._puppet_nicks.clear()
         self._puppet_irc_nicks.clear()
+        self._occupant_ids.clear()
         self._reconnecting = True
         await asyncio.sleep(2)
         self._xmpp.connect()
@@ -466,6 +511,7 @@ class XMPPComponent:
                 elif "301" in codes:
                     log.warning("Master JID banned from %s, not rejoining", muc_jid)
             elif event is not None:
+                self._occupant_ids.apply_event(event)
                 self._emit_occupant(event)
 
         # Puppet kicked or banned from MUC (presence addressed to the puppet)
@@ -478,6 +524,7 @@ class XMPPComponent:
             muc_jid = str(stanza["from"].bare)
             muc_key = muc_jid.lower()
             if nick and self._is_puppet_echo(muc_key, nick):
+                self._remember_occupant_id(muc_jid, nick, stanza.xml)
                 muc_x = stanza.xml.find(f"{{{_NS_MUC_USER}}}x")
                 if muc_x is not None:
                     item = muc_x.find(f"{{{_NS_MUC_USER}}}item")
@@ -486,6 +533,7 @@ class XMPPComponent:
             else:
                 event = occupant_event_from_presence(stanza, self.nick)
                 if event is not None and not event.is_self:
+                    self._occupant_ids.apply_event(event)
                     self._emit_occupant(event)
 
         return stanza
@@ -536,6 +584,7 @@ class XMPPComponent:
                 maxstanzas=0,
             )
             log.info("Rejoined MUC %s after kick", muc_jid)
+            await self._probe_occupant_ids(muc_jid)
         except Exception as e:
             log.warning("Failed to rejoin MUC %s: %s", muc_jid, e)
 
@@ -575,6 +624,7 @@ class XMPPComponent:
                 tried_nick, muc_jid, hash_nick,
             )
             self._puppet_nicks[muc_key][puppet_jid] = hash_nick
+            self._occupant_ids.forget(muc_key, tried_nick)
             stanza = self._xmpp["xep_0045"].make_join_stanza(
                 muc_jid, hash_nick,
                 maxstanzas=0,
@@ -605,6 +655,7 @@ class XMPPComponent:
         nick = msg["mucnick"]
         muc_jid = str(msg["from"].bare)
         muc_key = muc_jid.lower()
+        self._remember_occupant_id(muc_jid, nick, msg.xml)
 
         # Master bot echo - ignore
         if nick == self.nick:

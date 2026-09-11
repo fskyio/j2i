@@ -10,7 +10,11 @@ import slixmpp
 
 from j2i.version import CAPS_NODE, software_label, xep_0092_config
 from j2i.xmpp.avatar import Avatar
-from j2i.xmpp.presence import OccupantEvent, occupant_event_from_presence
+from j2i.xmpp.mentions import Mention, attach_mentions
+from j2i.xmpp.presence import (
+    OccupantEvent, OccupantIdStore, extract_occupant_id,
+    occupant_event_from_presence,
+)
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +54,7 @@ OccupantCallback = Callable[[OccupantEvent], Awaitable[None]]
 _NS_REACTIONS = "urn:xmpp:reactions:0"
 _NS_HINTS = "urn:xmpp:hints"
 _NS_SID = "urn:xmpp:sid:0"
+_NS_MENTIONS = "urn:xmpp:mentions:0"
 
 
 def extract_stanza_id(msg: slixmpp.Message) -> tuple[str | None, str | None]:
@@ -149,17 +154,20 @@ class XMPPClient:
         self._xmpp.requested_jid.resource = software_label(
             hide_version=hide_version
         )
+        self._occupant_ids = OccupantIdStore()
         self._xmpp.register_plugin("xep_0045")   # MUC
         self._xmpp.register_plugin("xep_0054")   # vcard-temp
         self._xmpp.register_plugin("xep_0153")   # vCard-Based Avatars
         self._xmpp.register_plugin("xep_0085")   # Chat State Notifications
         self._xmpp.register_plugin("xep_0199")   # Ping
         self._xmpp.register_plugin("xep_0308")   # Last Message Correction
+        self._xmpp.register_plugin("xep_0421")   # Occupant identifiers
         self._xmpp.register_plugin("xep_0444")   # Message Reactions
         self._xmpp.register_plugin("xep_0461")   # Message Replies
         configure_software_identity(
             self._xmpp, hide_version=hide_version, hide_os=hide_os
         )
+        self._xmpp["xep_0030"].add_feature(_NS_MENTIONS)
 
         self._xmpp.add_event_handler("session_start", self._on_session_start)
         self._xmpp.add_event_handler("disconnected", self._on_disconnected)
@@ -187,12 +195,39 @@ class XMPPClient:
     def add_muc(self, muc_jid: str) -> None:
         self._mucs.append(muc_jid)
 
-    async def send_message(self, muc_jid: str, text: str) -> str:
+    def occupant_id(self, muc_jid: str, nick: str) -> str | None:
+        """XEP-0421 occupant id if the room advertised support and we have one."""
+        return self._occupant_ids.get(muc_jid, nick)
+
+    def _remember_occupant_id(self, muc_jid: str, nick: str, xml) -> None:
+        if nick:
+            self._occupant_ids.remember(muc_jid, nick, extract_occupant_id(xml))
+
+    async def _probe_occupant_ids(self, muc_jid: str, *, ifrom=None) -> None:
+        try:
+            kwargs: dict = {}
+            if ifrom is not None:
+                kwargs["ifrom"] = ifrom
+            supported = await self._xmpp["xep_0421"].has_feature(
+                slixmpp.JID(muc_jid), **kwargs
+            )
+        except Exception as e:
+            log.debug("Occupant-id disco for %s failed: %s", muc_jid, e)
+            supported = False
+        self._occupant_ids.set_supported(muc_jid, supported)
+        if supported:
+            log.debug("MUC %s advertises XEP-0421 occupant ids", muc_jid)
+
+    async def send_message(
+        self, muc_jid: str, text: str, mentions: list[Mention] | None = None,
+    ) -> str:
         msg = self._xmpp.make_message(
             mto=muc_jid,
             mbody=text,
             mtype="groupchat",
         )
+        if mentions:
+            attach_mentions(msg, mentions)
         msg_id = msg["id"]
         msg.send()
         return msg_id
@@ -201,7 +236,12 @@ class XMPPClient:
         return await self.send_message(muc_jid, f"/me {text}")
 
     async def send_reply(
-        self, muc_jid: str, text: str, reply_to_id: str, reply_to: str | None = None
+        self,
+        muc_jid: str,
+        text: str,
+        reply_to_id: str,
+        reply_to: str | None = None,
+        mentions: list[Mention] | None = None,
     ) -> str:
         """Send a groupchat message as an XEP-0461 reply."""
         msg = self._xmpp.make_message(
@@ -212,6 +252,8 @@ class XMPPClient:
         msg["reply"]["id"] = reply_to_id
         if reply_to:
             msg["reply"]["to"] = reply_to
+        if mentions:
+            attach_mentions(msg, mentions)
         msg_id = msg["id"]
         msg.send()
         return msg_id
@@ -257,6 +299,7 @@ class XMPPClient:
             try:
                 await muc.join_muc_wait(room, self.nick, maxstanzas=0)
                 log.info("Joined XMPP MUC: %s", room)
+                await self._probe_occupant_ids(room)
             except Exception as e:
                 log.warning("Failed to join MUC %s: %s", room, e)
 
@@ -267,6 +310,7 @@ class XMPPClient:
             return
         log.warning("XMPP disconnected, reconnecting...")
         self._connected.clear()
+        self._occupant_ids.clear()
         await asyncio.sleep(2)
         self._xmpp.connect()
 
@@ -274,6 +318,7 @@ class XMPPClient:
         event = occupant_event_from_presence(pres, self.nick)
         if event is None:
             return
+        self._occupant_ids.apply_event(event)
         if event.is_self and event.kind == "leave":
             muc_jid = event.muc_jid
             if "307" in event.status_codes:
@@ -294,11 +339,14 @@ class XMPPClient:
                 muc_jid, self.nick, maxstanzas=0
             )
             log.info("Rejoined MUC %s after kick", muc_jid)
+            await self._probe_occupant_ids(muc_jid)
         except Exception as e:
             log.warning("Failed to rejoin MUC %s: %s", muc_jid, e)
 
     async def _on_groupchat_message(self, msg: slixmpp.Message) -> None:
         nick = msg["mucnick"]
+        muc_jid = str(msg["from"].bare)
+        self._remember_occupant_id(muc_jid, nick, msg.xml)
         if nick == self.nick:
             # Our own message reflected back - grab the server-assigned
             # stanza-id and map it to our client-generated id

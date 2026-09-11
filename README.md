@@ -8,6 +8,7 @@ A bridge between XMPP MUCs and IRC channels. Supports both basic plumbing (bot r
 - **Puppeteering** - XMPP users appear on IRC with their real nick via [RELAYMSG](https://raw.githubusercontent.com/ircv3/ircv3-specifications/66233655658dce029fc2a5184a0ab97201a4ceec/extensions/relaymsg.md) or opt-in nick puppets (extra IRC connections); IRC users appear in XMPP MUCs as puppet JIDs via [XEP-0114 component](https://xmpp.org/extensions/xep-0114.html)
 - **Ban syncing** - optional: when a component puppet is banned in a MUC, the corresponding IRC nick is given `+b` and kicked. Off by default (`sync_bans`)
 - **Smart replies** - XEP-0461 replies from XMPP become IRCv3 `+reply` from nick puppets (no quote prefix when the msgid is known), or `nick: ` / quoted text for RELAYMSG and bot-relay; IRCv3 reply tags are preserved
+- **Mentions** - IRC nick mentions of j2i puppets (and of other IRC users) are rewritten to the XMPP-visible nick and sent as [XEP-0513](https://xmpp.org/extensions/xep-0513.html) explicit mentions, using [XEP-0421](https://xmpp.org/extensions/xep-0421.html) occupant ids when the MUC supports them (occupant JID otherwise)
 - **Reactions** - XMPP reactions (XEP-0444) are relayed to IRC as attributed text; IRC `+draft/react`/`+draft/unreact` tags are bridged natively to XMPP reactions
 - **Message edits** - XEP-0308 corrections are relayed to IRC as `* corrected text`, with IRCv3 `+reply` pointing at the original when its msgid is known
 - **Pastebin** - messages exceeding a configurable line limit are uploaded to a pastebin and linked instead of flooding
@@ -124,6 +125,8 @@ Set `component = false` in `[[xmpp]]` and `relaymsg = false` in `[[irc]]`. The b
 `puppet_presence` (default `lazy`): JOIN on first speak/react, idle-QUIT while the occupant is still lurking in the MUC, and PART immediately when they leave. A MUC kick or ban QUITs the IRC nick (or PARTs that channel with the kick/ban reason if the puppet is in other channels). Set `eager` to JOIN on MUC presence so `/names` matches the room; idle timeout is ignored, and a full pool never evicts someone still present (extra occupants overflow to prefixed bot text). Eager is for an ircd you control (`max_puppets = 0`, or a cap at least as large as the room).
 
 Nick puppets register with the original MUC nick as GECOS (`/whois` realname) so sanitized IRC nicks remain attributable. MUC nick changes also `SETNAME` when the network supports it.
+
+Mentioning a puppet nick on IRC (`hello alice|xmpp`) is rewritten on XMPP to the real MUC nick (`hello alice`) with a XEP-0513 mention. Mentioning a real IRC nick is forwarded as a mention of that user's XMPP puppet. Rooms that advertise occupant ids (XEP-0421) get `occupantid`; other rooms fall back to the occupant JID. Clients that do not support XEP-0513 still see the regular nick in the body.
 
 `puppet_mode` values: `relaymsg` (default, current behaviour), `nicks` (never RELAYMSG), `auto` (RELAYMSG then nicks), `prefix` (always `<nick> text`). Existing configs that omit these keys are unchanged.
 

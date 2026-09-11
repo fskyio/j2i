@@ -19,9 +19,10 @@ from j2i.bridge import (
     _puppet_jid,
     _split_to_byte_limit,
 )
-from j2i.config import BridgeMapping, Config, IRCConfig, Settings
+from j2i.config import BridgeMapping, Config, IRCConfig, Settings, XMPPConfig
 from j2i.irc.client import IRCClient
 from j2i.xmpp.client import XMPPMessage
+from j2i.xmpp.mentions import rewrite_irc_mentions
 
 
 class TestAntiPing:
@@ -588,4 +589,123 @@ class TestOccupantToIrc:
         assert released == [
             ("net", "alice", "#c", "Kicked from XMPP (mod): trolling")
         ]
+
+
+class TestMentionTargets:
+    def _bridge(self, *, component: bool = False) -> Bridge:
+        xmpp = XMPPConfig(
+            name="x", jid="a@b", password="p",
+            component=component,
+            component_domain="irc.example.org" if component else None,
+        )
+        cfg = Config(
+            xmpp=[xmpp],
+            irc=[
+                IRCConfig(
+                    name="net", host="h", nick="bot",
+                    puppet_mode="nicks", relaymsg=False,
+                )
+            ],
+            bridges=[
+                BridgeMapping(
+                    xmpp="x", xmpp_muc="m@c", irc="net", irc_channel="#c",
+                )
+            ],
+            settings=Settings(irc_puppet_mode="nicks"),
+        )
+        bridge = Bridge(cfg)
+        master = IRCClient(host="h", port=6697, nick="bot")
+        master.channels["#c"] = True
+        bridge.irc_clients["net"] = master
+        return bridge
+
+    def test_xmpp_occupant_maps_puppet_display_nick(self):
+        from j2i.xmpp.client import XMPPClient
+
+        bridge = self._bridge()
+        client = XMPPClient("a@b", "p")
+        client._occupant_ids.set_supported("m@c", True)
+        client._occupant_ids.remember("m@c", "alice", "oid-alice")
+        bridge.xmpp_clients["x"] = client
+        bridge._xmpp_occupants[("x", "m@c")] = {"alice"}
+
+        class _Pool:
+            def display_nick(self, irc_name, xmpp_nick):
+                return f"{xmpp_nick}|xmpp"
+
+            def is_owned(self, irc_name, nick):
+                return nick.endswith("|xmpp")
+
+        bridge.puppet_pool = _Pool()  # type: ignore[assignment]
+        b = bridge.config.bridges[0]
+        targets, extra = bridge._mention_targets(b, "net", "#c", sender="bob")
+        assert "alice|xmpp" in targets
+        assert targets["alice|xmpp"].fallback == "alice"
+        assert targets["alice|xmpp"].occupant_id == "oid-alice"
+        assert targets["alice|xmpp"].occupant_jid == "m@c/alice"
+
+        text, mentions = rewrite_irc_mentions(
+            "hello alice|xmpp how are you", targets
+        )
+        assert text == "hello alice how are you"
+        assert mentions[0].occupant_id == "oid-alice"
+
+    def test_irc_member_maps_to_component_puppet(self):
+        from j2i.xmpp.presence import OccupantIdStore
+
+        bridge = self._bridge(component=True)
+        store = OccupantIdStore()
+        store.set_supported("m@c", True)
+        store.remember("m@c", "bob", "oid-bob")
+
+        class _Component:
+            def __init__(self):
+                self._occupant_ids = store
+                self._puppet_nicks = {
+                    "m@c": {"bob.net@irc.example.org": "bob"}
+                }
+
+            def occupant_id(self, muc_jid, nick):
+                return self._occupant_ids.get(muc_jid, nick)
+
+        stub = _Component()
+        bridge.xmpp_clients["x"] = stub  # type: ignore[assignment]
+        bridge.xmpp_components["x"] = stub  # type: ignore[assignment]
+        bridge.irc_clients["net"]._channel_members["#c"] = {"bob"}
+
+        class _Pool:
+            def is_owned(self, irc_name, nick):
+                return False
+
+            def display_nick(self, irc_name, xmpp_nick):
+                return xmpp_nick
+
+        bridge.puppet_pool = _Pool()  # type: ignore[assignment]
+        b = bridge.config.bridges[0]
+        targets, _extra = bridge._mention_targets(b, "net", "#c", sender="alice")
+        assert targets["bob"].fallback == "bob"
+        assert targets["bob"].occupant_id == "oid-bob"
+        assert targets["bob"].occupant_jid == "m@c/bob"
+
+    def test_jid_fallback_when_room_has_no_occupant_ids(self):
+        from j2i.xmpp.client import XMPPClient
+
+        bridge = self._bridge()
+        client = XMPPClient("a@b", "p")
+        client._occupant_ids.remember("m@c", "alice", "forged")
+        bridge.xmpp_clients["x"] = client
+        bridge._xmpp_occupants[("x", "m@c")] = {"alice"}
+
+        class _Pool:
+            def display_nick(self, irc_name, xmpp_nick):
+                return f"{xmpp_nick}|xmpp"
+
+            def is_owned(self, irc_name, nick):
+                return False
+
+        bridge.puppet_pool = _Pool()  # type: ignore[assignment]
+        b = bridge.config.bridges[0]
+        targets, _ = bridge._mention_targets(b, "net", "#c", sender="bob")
+        assert targets["alice|xmpp"].occupant_id is None
+        assert targets["alice|xmpp"].occupant_jid == "m@c/alice"
 

@@ -13,6 +13,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 - Optional `irc_puppet_presence = "eager"` (per-network `puppet_presence`) so puppets JOIN on MUC presence; default `lazy` still JOINs on first speak, idle-QUITs lurkers, and never holds extra sockets for occupancy. Eager ignores idle timeout and will not LRU-evict a live occupant (overflow is prefixed bot text)
 - Nick puppets use the original XMPP nick as IRC GECOS (ident is a sanitized form of that nick, not `j2i`); MUC nick changes `SETNAME` when the network supports it
 - XMPP MUC kicks/bans of real occupants QUIT the IRC puppet with a reason (or PART that channel if the nick is still in others)
+- IRC nick mentions of j2i puppets (and of other IRC users) become XEP-0513 explicit mentions on XMPP, with the body rewritten to the XMPP-visible nick; occupant ids (XEP-0421) are used when the MUC advertises them, otherwise the occupant JID
 
 ### Changed
 - XMPP replies sent as a connected nick puppet omit the `(re nick: "…")` quote prefix when an IRCv3 `+reply` msgid is available
