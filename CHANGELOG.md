@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 - IRC nick puppets: opt-in extra TCP connections so XMPP occupants speak as real IRC nicks (native reactions/typing), with a per-network pool, suffix/collision scheme, and no change to existing RELAYMSG configs (`irc_puppet_mode` defaults to `relaymsg`)
+- Nick-puppet occupancy: XMPP leave/kick/ban PARTs (or QUITs) the IRC nick, MUC nick changes become IRC NICK, and away/xa/dnd map to AWAY when a socket already exists
+- Optional `irc_puppet_presence = "eager"` (per-network `puppet_presence`) so puppets JOIN on MUC presence; default `lazy` still JOINs on first speak, idle-QUITs lurkers, and never holds extra sockets for occupancy. Eager ignores idle timeout and will not LRU-evict a live occupant (overflow is prefixed bot text)
+
+### Changed
+- XMPP replies sent as a connected nick puppet omit the `(re nick: "…")` quote prefix when an IRCv3 `+reply` msgid is available
 
 ### Fixed
 - Key IRC echo-message stanza-id queues per sending connection so a puppet echo cannot be mapped to a message the master (or another puppet) just sent

@@ -110,6 +110,89 @@ class TestBanAndKick:
         assert sent[1] == "KICK #c bob :Banned from XMPP MUC"
 
 
+class TestSendAway:
+    def test_sets_reason(self):
+        client = _client()
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        asyncio.run(client.send_away("brb"))
+        assert sent == ["AWAY :brb"]
+
+    def test_clears_when_none_or_empty(self):
+        client = _client()
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        asyncio.run(client.send_away(None))
+        assert sent == ["AWAY"]
+        sent.clear()
+        asyncio.run(client.send_away(""))
+        assert sent == ["AWAY :"]
+
+
+class TestChangeNick:
+    def test_rejected_before_registration(self):
+        client = _client()
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        assert asyncio.run(client.change_nick("other")) is False
+        assert sent == []
+
+    def test_noop_when_unchanged(self):
+        client = _client()
+        client._registered = True
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        assert asyncio.run(client.change_nick("bridge")) is True
+        assert sent == []
+
+    def test_succeeds_on_nick_echo(self):
+        client = _client()
+        client._registered = True
+
+        async def fake_send(line: str) -> None:
+            if line == "NICK other":
+                await client._dispatch(
+                    {}, "bridge!u@h", "NICK", ["other"]
+                )
+
+        client._send = fake_send  # type: ignore[method-assign]
+        assert asyncio.run(client.change_nick("other")) is True
+        assert client.nick == "other"
+
+    def test_post_register_433_does_not_fail_registration(self):
+        client = _client()
+        client._registered = True
+        client._register_event.set()
+
+        async def fake_send(line: str) -> None:
+            if line == "NICK taken":
+                await client._dispatch(
+                    {}, "irc.example.org", "433",
+                    ["bridge", "taken", "Nickname is already in use"],
+                )
+
+        client._send = fake_send  # type: ignore[method-assign]
+        assert asyncio.run(client.change_nick("taken")) is False
+        assert client.nick_rejected is False
+        assert client._register_event.is_set()
+
+
 class TestChanopErrors:
     def test_logs_482(self, caplog):
         client = _client()

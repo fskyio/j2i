@@ -7,6 +7,9 @@ from pathlib import Path
 # How XMPP occupants are attributed on IRC (not whether rooms are bridged).
 PUPPET_MODES = frozenset({"relaymsg", "nicks", "auto", "prefix"})
 
+# When nick puppets JOIN/QUIT relative to MUC occupancy.
+PUPPET_PRESENCE = frozenset({"lazy", "eager"})
+
 # Characters legal in an IRC nick; the puppet separator must be one of these.
 _NICK_CHAR = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-[]\\`^{}|()")
 
@@ -51,6 +54,7 @@ class IRCConfig:
     # None = inherit suffix resolution; "" = unsuffixed nicks
     puppet_suffix: str | None = None
     puppet_separator: str | None = None
+    puppet_presence: str | None = None
 
 
 @dataclass
@@ -101,6 +105,11 @@ class Settings:
     irc_puppet_suffix: str | None = None
     # Single legal nick character between base and suffix. "/" is not legal.
     irc_puppet_separator: str = "|"
+    # When nick puppets occupy IRC. "lazy" (default): JOIN on first speak,
+    # idle-QUIT while lurking, PART on XMPP leave. "eager": JOIN on MUC
+    # presence and stay until leave; idle timeout is ignored. Public nets
+    # should keep lazy; eager is for an ircd you control.
+    irc_puppet_presence: str = "lazy"
     # Avatar byte budget: the re-encoded image must fit under this so the
     # base64 vcard-temp stanza stays under the server's max stanza size.
     # This is the real, server-enforced limit (image dimensions are cosmetic).
@@ -189,6 +198,9 @@ def _validate(cfg: Config) -> None:
             )
 
     _validate_puppet_mode("settings.irc_puppet_mode", cfg.settings.irc_puppet_mode)
+    _validate_puppet_presence(
+        "settings.irc_puppet_presence", cfg.settings.irc_puppet_presence
+    )
     _validate_puppet_separator(
         "settings.irc_puppet_separator", cfg.settings.irc_puppet_separator
     )
@@ -204,6 +216,10 @@ def _validate(cfg: Config) -> None:
     for i in cfg.irc:
         if i.puppet_mode is not None:
             _validate_puppet_mode(f"irc {i.name!r} puppet_mode", i.puppet_mode)
+        if i.puppet_presence is not None:
+            _validate_puppet_presence(
+                f"irc {i.name!r} puppet_presence", i.puppet_presence
+            )
         if i.puppet_separator is not None:
             _validate_puppet_separator(
                 f"irc {i.name!r} puppet_separator", i.puppet_separator
@@ -222,6 +238,12 @@ def _validate_puppet_mode(label: str, mode: str) -> None:
     if mode not in PUPPET_MODES:
         allowed = ", ".join(sorted(PUPPET_MODES))
         raise ValueError(f"{label} must be one of: {allowed} (got {mode!r})")
+
+
+def _validate_puppet_presence(label: str, value: str) -> None:
+    if value not in PUPPET_PRESENCE:
+        allowed = ", ".join(sorted(PUPPET_PRESENCE))
+        raise ValueError(f"{label} must be one of: {allowed} (got {value!r})")
 
 
 def _validate_puppet_separator(label: str, sep: str) -> None:
@@ -246,6 +268,12 @@ def resolve_puppet_mode(irc: IRCConfig, settings: Settings) -> str:
     if irc.puppet_mode is not None:
         return irc.puppet_mode
     return settings.irc_puppet_mode
+
+
+def resolve_puppet_presence(irc: IRCConfig, settings: Settings) -> str:
+    if irc.puppet_presence is not None:
+        return irc.puppet_presence
+    return settings.irc_puppet_presence
 
 
 def resolve_max_puppets(irc: IRCConfig, settings: Settings) -> int:

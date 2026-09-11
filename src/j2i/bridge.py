@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import TypeVar
 
-from j2i.config import Config, BridgeMapping, IRCConfig, resolve_puppet_mode
+from j2i.config import Config, BridgeMapping, IRCConfig, resolve_puppet_mode, resolve_puppet_presence
 from j2i.irc.client import IRCClient, IRCMessage
 from j2i.irc.nicks import sanitize_irc_nick
 from j2i.irc.puppets import IrcPuppetPool
@@ -15,6 +15,7 @@ from j2i.pastebin import upload as pastebin_upload
 from j2i.xmpp.avatar import Avatar, default_avatar_path
 from j2i.xmpp.client import XMPPClient, XMPPMessage
 from j2i.xmpp.component import XMPPComponent
+from j2i.xmpp.presence import OccupantEvent
 
 log = logging.getLogger(__name__)
 
@@ -323,6 +324,8 @@ class Bridge:
 
         self._stopping: bool = False
         self.puppet_pool: IrcPuppetPool | None = None
+        # Real XMPP occupants per (xmpp_name, muc_jid.lower())
+        self._xmpp_occupants: dict[tuple[str, str], set[str]] = {}
 
     def _setting(self, b: BridgeMapping, name: str):
         """Resolve a setting: per-bridge override if set, else global."""
@@ -374,17 +377,24 @@ class Bridge:
             return not self._wants_relaymsg(irc_cfg, irc_client, channel)
         return False
 
+    def _puppet_presence(self, irc_cfg: IRCConfig) -> str:
+        return resolve_puppet_presence(irc_cfg, self.config.settings)
+
     async def _maybe_puppet(
         self,
         irc_cfg: IRCConfig,
         irc_client: IRCClient,
         channel: str,
         nick: str,
+        *,
+        ignore_kick: bool = True,
     ) -> IRCClient | None:
         if not self._wants_puppet(irc_cfg, irc_client, channel):
             return None
         assert self.puppet_pool is not None
-        return await self.puppet_pool.acquire(irc_cfg.name, nick, channel)
+        return await self.puppet_pool.acquire(
+            irc_cfg.name, nick, channel, ignore_kick=ignore_kick,
+        )
 
     def _cache_body(self, ref: MsgRef, body: str) -> None:
         """Store a message body in the bounded reply-excerpt cache."""
@@ -411,6 +421,7 @@ class Bridge:
             self.config,
             self.irc_clients,
             on_self_message=self._make_irc_self_msg_handler,
+            on_dropped=self._on_puppet_dropped,
         )
         self._build_lookup_tables()
         self._wire_callbacks()
@@ -518,10 +529,12 @@ class Bridge:
             client.on_self_message = self._make_xmpp_self_msg_handler(xmpp_name)
             client.on_reaction = self._make_xmpp_reaction_handler(xmpp_name)
             client.on_typing = self._make_xmpp_typing_handler(xmpp_name)
+            client.on_occupant = self._make_xmpp_occupant_handler(xmpp_name)
 
         for xmpp_name, component in self.xmpp_components.items():
             component.on_reconnected = self._make_xmpp_reconnect_handler(xmpp_name)
             component.on_puppet_banned = self._make_puppet_banned_handler(xmpp_name)
+            component.on_occupant = self._make_xmpp_occupant_handler(xmpp_name)
 
     async def _connect_all(self) -> None:
         tasks: list[asyncio.Task] = []
@@ -832,6 +845,8 @@ class Bridge:
         """
         async def handler() -> None:
             log.info("XMPP component %s reconnected, re-joining puppets", xmpp_name)
+            for occ_key in [k for k in self._xmpp_occupants if k[0] == xmpp_name]:
+                self._xmpp_occupants.pop(occ_key, None)
             for b in self.config.bridges:
                 if b.xmpp != xmpp_name or b.xmpp not in self.xmpp_components:
                     continue
@@ -932,6 +947,8 @@ class Bridge:
                     else None
                 )
                 if puppet is not None:
+                    assert self.puppet_pool is not None
+                    self.puppet_pool.touch(b.irc, nick)
                     await puppet.send_typing(b.irc_channel, is_typing)
                 elif self._wants_puppet(irc_cfg, irc_client, b.irc_channel):
                     # Don't spawn a socket just to type, and don't type as the bot.
@@ -940,6 +957,105 @@ class Bridge:
                     await irc_client.send_typing(b.irc_channel, is_typing)
 
         return handler
+
+    def _make_xmpp_occupant_handler(self, xmpp_name: str):
+        async def handler(event: OccupantEvent) -> None:
+            if event.is_self:
+                return
+            if xmpp_name in self.xmpp_components:
+                component = self.xmpp_components[xmpp_name]
+                if component.is_puppet_nick(event.muc_jid, event.nick):
+                    return
+                if event.new_nick and component.is_puppet_nick(
+                    event.muc_jid, event.new_nick
+                ):
+                    return
+
+            occ_key = (xmpp_name, event.muc_jid.lower())
+            occupants = self._xmpp_occupants.setdefault(occ_key, set())
+            key = (xmpp_name, event.muc_jid.lower())
+            bridges = self._xmpp_to_bridges.get(key, [])
+
+            if event.kind == "leave":
+                occupants.discard(event.nick)
+                for b in bridges:
+                    await self._release_occupant_puppet(b, event.nick)
+                return
+
+            if event.kind == "nick" and event.new_nick:
+                occupants.discard(event.nick)
+                occupants.add(event.new_nick)
+                if self.puppet_pool is not None:
+                    for b in bridges:
+                        irc_client = self.irc_clients.get(b.irc)
+                        if irc_client is None:
+                            continue
+                        irc_cfg = self.config.irc_by_name(b.irc)
+                        if not self._wants_puppet(irc_cfg, irc_client, b.irc_channel):
+                            continue
+                        await self.puppet_pool.rename(
+                            b.irc, event.nick, event.new_nick,
+                        )
+                return
+
+            # join (and subsequent available / away updates)
+            occupants.add(event.nick)
+            for b in bridges:
+                irc_client = self.irc_clients.get(b.irc)
+                if irc_client is None:
+                    continue
+                irc_cfg = self.config.irc_by_name(b.irc)
+                if not self._wants_puppet(irc_cfg, irc_client, b.irc_channel):
+                    continue
+                assert self.puppet_pool is not None
+                if self._puppet_presence(irc_cfg) == "eager":
+                    await self.puppet_pool.acquire(
+                        b.irc, event.nick, b.irc_channel, ignore_kick=False,
+                    )
+                await self.puppet_pool.set_away(
+                    b.irc, event.nick, event.away_reason,
+                )
+
+        return handler
+
+    async def _release_occupant_puppet(
+        self, b: BridgeMapping, xmpp_nick: str
+    ) -> None:
+        if self.puppet_pool is None:
+            return
+        irc_client = self.irc_clients.get(b.irc)
+        if irc_client is None:
+            return
+        irc_cfg = self.config.irc_by_name(b.irc)
+        if not self._wants_puppet(irc_cfg, irc_client, b.irc_channel):
+            return
+        await self.puppet_pool.release(b.irc, xmpp_nick, b.irc_channel)
+
+    async def _on_puppet_dropped(
+        self, irc_name: str, xmpp_nick: str, channels: list[str]
+    ) -> None:
+        if self._stopping or self.puppet_pool is None:
+            return
+        irc_cfg = self.config.irc_by_name(irc_name)
+        if self._puppet_presence(irc_cfg) != "eager":
+            return
+        irc_client = self.irc_clients.get(irc_name)
+        if irc_client is None:
+            return
+        for channel in channels:
+            if self.puppet_pool.was_kicked(irc_name, xmpp_nick, channel):
+                continue
+            for b in self._irc_to_bridges.get((irc_name, channel.lower()), []):
+                if not self._wants_puppet(irc_cfg, irc_client, b.irc_channel):
+                    continue
+                occ = self._xmpp_occupants.get(
+                    (b.xmpp, b.xmpp_muc.lower()), set()
+                )
+                if xmpp_nick not in occ:
+                    continue
+                await self.puppet_pool.acquire(
+                    irc_name, xmpp_nick, b.irc_channel, ignore_kick=False,
+                )
 
     def _make_xmpp_handler(self, xmpp_name: str):
         async def handler(msg: XMPPMessage) -> None:
@@ -1108,8 +1224,6 @@ class Bridge:
         if msg.is_correction:
             text = self._format_correction(text)
 
-        reply_prefix = self._format_reply_prefix(msg, irc_client, irc_cfg, b, xmpp_name)
-
         # Look up native IRC reply tag for XEP-0461 replies
         irc_reply_ref = (
             self._xmpp_sid_to_irc_msgid.get(
@@ -1123,6 +1237,14 @@ class Bridge:
         puppet = await self._maybe_puppet(irc_cfg, irc_client, channel, msg.nick)
         sender = puppet if puppet is not None else irc_client
         as_puppet = puppet is not None
+
+        # Connected puppets with +reply do not need the quote/ping crutch.
+        if as_puppet and irc_reply_to:
+            reply_prefix = ""
+        else:
+            reply_prefix = self._format_reply_prefix(
+                msg, irc_client, irc_cfg, b, xmpp_name
+            )
 
         # Split into logical lines, then break any line that would overflow
         # the IRC line-length limit into byte-sized pieces. The pieces count

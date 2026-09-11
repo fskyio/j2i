@@ -307,3 +307,123 @@ class TestEchoSidMapping:
         assert bridge._xmpp_sid_to_irc_msgid[sid_2] == irc_ref(
             "net", channel, "msgid-2"
         )
+
+
+class TestPuppetReplyPrefix:
+    def _setup(self):
+        cfg = Config(
+            settings=Settings(reply_style="quote", irc_puppet_mode="nicks"),
+        )
+        bridge = Bridge(cfg)
+        master = IRCClient(host="h", port=6697, nick="bot")
+        master.has_message_tags = True
+        irc_cfg = IRCConfig(
+            name="net", host="h", nick="bot", puppet_mode="nicks",
+        )
+        b = BridgeMapping(
+            xmpp="x", xmpp_muc="m@c", irc="net", irc_channel="#c",
+            anti_ping=False, max_lines=0,
+        )
+        return bridge, master, irc_cfg, b
+
+    @pytest.mark.asyncio
+    async def test_skips_quote_when_puppet_has_reply_msgid(self):
+        bridge, master, irc_cfg, b = self._setup()
+        sent: list[tuple] = []
+
+        class _Puppet:
+            has_echo_message = False
+            has_message_tags = True
+            line_len = 512
+
+            def can_multiline(self, lines):
+                return False
+
+            async def send_message(self, channel, text, reply_to=None):
+                sent.append((text, reply_to))
+
+        async def fake_maybe(*_a, **_k):
+            return _Puppet()
+
+        bridge._maybe_puppet = fake_maybe  # type: ignore[method-assign]
+        sid = xmpp_ref("x", "m@c", "sid-1")
+        bridge._xmpp_sid_to_irc_msgid[sid] = irc_ref("net", "#c", "mid-1")
+        bridge._cache_body(sid, "original")
+        msg = XMPPMessage(
+            muc_jid="m@c", nick="alice", body="hello",
+            reply_to_nick="bob", reply_to_id="sid-1",
+        )
+        await bridge._relay_to_irc(master, irc_cfg, "#c", msg, b, "x")
+        assert sent == [("hello", "mid-1")]
+
+    @pytest.mark.asyncio
+    async def test_keeps_quote_when_puppet_has_no_msgid(self):
+        bridge, master, irc_cfg, b = self._setup()
+        sent: list[tuple] = []
+
+        class _Puppet:
+            has_echo_message = False
+            has_message_tags = True
+            line_len = 512
+
+            def can_multiline(self, lines):
+                return False
+
+            async def send_message(self, channel, text, reply_to=None):
+                sent.append((text, reply_to))
+
+        async def fake_maybe(*_a, **_k):
+            return _Puppet()
+
+        bridge._maybe_puppet = fake_maybe  # type: ignore[method-assign]
+        sid = xmpp_ref("x", "m@c", "sid-1")
+        bridge._cache_body(sid, "original")
+        msg = XMPPMessage(
+            muc_jid="m@c", nick="alice", body="hello",
+            reply_to_nick="bob", reply_to_id="sid-1",
+        )
+        await bridge._relay_to_irc(master, irc_cfg, "#c", msg, b, "x")
+        assert sent[0][0].startswith('(re bob: "original") ')
+        assert sent[0][1] is None
+
+
+class TestOccupantToIrc:
+    @pytest.mark.asyncio
+    async def test_leave_releases_puppet_channel(self):
+        from j2i.xmpp.client import XMPPClient
+        from j2i.xmpp.presence import OccupantEvent
+
+        cfg = Config(
+            xmpp=[],
+            irc=[
+                IRCConfig(
+                    name="net", host="h", nick="bot", puppet_mode="nicks",
+                )
+            ],
+            bridges=[
+                BridgeMapping(
+                    xmpp="x", xmpp_muc="m@c", irc="net", irc_channel="#c",
+                )
+            ],
+            settings=Settings(irc_puppet_mode="nicks"),
+        )
+        bridge = Bridge(cfg)
+        released: list[tuple] = []
+
+        class _Pool:
+            async def release(self, irc_name, nick, channel):
+                released.append((irc_name, nick, channel))
+
+        master = IRCClient(host="h", port=6697, nick="bot")
+        master.channels["#c"] = True
+        bridge.irc_clients["net"] = master
+        bridge.xmpp_clients["x"] = XMPPClient("a@b", "p")  # unused beyond name
+        bridge.puppet_pool = _Pool()  # type: ignore[assignment]
+        bridge._build_lookup_tables()
+        handler = bridge._make_xmpp_occupant_handler("x")
+        await handler(
+            OccupantEvent(muc_jid="m@c", nick="alice", kind="leave")
+        )
+        assert released == [("net", "alice", "#c")]
+        assert "alice" not in bridge._xmpp_occupants[("x", "m@c")]
+

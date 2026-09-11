@@ -157,6 +157,9 @@ class IRCClient:
     )
     _intentional_close: bool = field(default=False, repr=False)
     nick_rejected: bool = field(default=False, repr=False)
+    _nick_change_future: asyncio.Future[bool] | None = field(
+        default=None, repr=False
+    )
 
     async def connect(self) -> None:
         # Reset state from any previous connection
@@ -165,6 +168,9 @@ class IRCClient:
         self._register_fail_event.clear()
         self._intentional_close = False
         self.nick_rejected = False
+        if self._nick_change_future is not None and not self._nick_change_future.done():
+            self._nick_change_future.set_result(False)
+        self._nick_change_future = None
         self.has_relaymsg = False
         self.has_message_tags = False
         self.has_echo_message = False
@@ -244,6 +250,33 @@ class IRCClient:
         await self._send(f"PART {channel}")
         self.channels.pop(channel.lower(), None)
         self._channel_members.pop(channel.lower(), None)
+
+    async def send_away(self, reason: str | None) -> None:
+        """Set or clear user AWAY. ``None`` clears; any string (even empty) sets."""
+        if reason is None:
+            await self._send("AWAY")
+        else:
+            await self._send(f"AWAY :{reason}")
+
+    async def change_nick(self, new_nick: str, timeout: float = 10.0) -> bool:
+        """Change nick after registration. Return True if the server accepted it."""
+        if not self._registered:
+            return False
+        if new_nick == self.nick:
+            return True
+        if self._nick_change_future is not None and not self._nick_change_future.done():
+            self._nick_change_future.set_result(False)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[bool] = loop.create_future()
+        self._nick_change_future = fut
+        try:
+            await self._send(f"NICK {new_nick}")
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+        except (asyncio.TimeoutError, OSError):
+            return False
+        finally:
+            if self._nick_change_future is fut:
+                self._nick_change_future = None
 
     async def disconnect(self, reason: str = "Bridge shutting down") -> None:
         """QUIT (if possible) and close without firing on_disconnect."""
@@ -448,8 +481,14 @@ class IRCClient:
         elif command in ("432", "433", "436", "437"):
             # Nick rejected / in use / collision / unavailable
             log.warning("Nick %s rejected (%s): %s", self.nick, command, params)
-            self.nick_rejected = True
-            self._register_fail_event.set()
+            if not self._registered:
+                self.nick_rejected = True
+                self._register_fail_event.set()
+            elif (
+                self._nick_change_future is not None
+                and not self._nick_change_future.done()
+            ):
+                self._nick_change_future.set_result(False)
 
         elif command == "MODE":
             await self._handle_mode(params)
@@ -537,6 +576,11 @@ class IRCClient:
         new_nick = params[0]
         if old_nick == self.nick:
             self.nick = new_nick
+            if (
+                self._nick_change_future is not None
+                and not self._nick_change_future.done()
+            ):
+                self._nick_change_future.set_result(True)
             return
         shared_channels = []
         for ch, members in self._channel_members.items():

@@ -10,6 +10,7 @@ from j2i.config import (
     load_config,
     resolve_max_puppets,
     resolve_puppet_mode,
+    resolve_puppet_presence,
     resolve_puppet_suffix,
 )
 
@@ -47,9 +48,11 @@ class TestDefaultsPreserveRelaymsg:
         assert cfg.settings.irc_puppet_idle_seconds == 600
         assert cfg.settings.irc_puppet_suffix is None
         assert cfg.settings.irc_puppet_separator == "|"
+        assert cfg.settings.irc_puppet_presence == "lazy"
         irc = cfg.irc_by_name("net")
         assert irc.puppet_mode is None
         assert resolve_puppet_mode(irc, cfg.settings) == "relaymsg"
+        assert resolve_puppet_presence(irc, cfg.settings) == "lazy"
 
     def test_suffix_inherits_relaymsg_suffix(self, tmp_path: Path):
         cfg = load_config(_write(tmp_path, _BASE + "\n[settings]\nrelaymsg_suffix = \"bridge\"\n"))
@@ -62,13 +65,15 @@ class TestPerNetworkOverride:
         body = _BASE.replace(
             'nick = "bridge"',
             'nick = "bridge"\npuppet_mode = "nicks"\nmax_puppets = 0\n'
-            'puppet_idle_seconds = 0\npuppet_suffix = ""\n',
+            'puppet_idle_seconds = 0\npuppet_suffix = ""\n'
+            'puppet_presence = "eager"\n',
         )
         cfg = load_config(_write(tmp_path, body))
         irc = cfg.irc_by_name("net")
         assert resolve_puppet_mode(irc, cfg.settings) == "nicks"
         assert resolve_max_puppets(irc, cfg.settings) == 0
         assert resolve_puppet_suffix(irc, cfg.settings) == ""
+        assert resolve_puppet_presence(irc, cfg.settings) == "eager"
 
 
 class TestValidation:
@@ -76,6 +81,15 @@ class TestValidation:
         with pytest.raises(ValueError, match="puppet_mode"):
             load_config(
                 _write(tmp_path, _BASE + "\n[settings]\nirc_puppet_mode = \"plumbing\"\n")
+            )
+
+    def test_bad_presence_rejected(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="puppet_presence"):
+            load_config(
+                _write(
+                    tmp_path,
+                    _BASE + "\n[settings]\nirc_puppet_presence = \"always\"\n",
+                )
             )
 
     def test_slash_separator_rejected(self, tmp_path: Path):

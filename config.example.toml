@@ -92,6 +92,7 @@ relaymsg = true
 # puppet_idle_seconds = 0      # 0 = never QUIT idle puppets
 # puppet_suffix = ""           # "" = unsuffixed nicks (alice); default inherits relaymsg_suffix
 # puppet_separator = "|"       # legal nick char between base and suffix (not "/")
+# puppet_presence = "eager"    # "lazy" (default): JOIN on speak; "eager": JOIN on MUC presence
 
 # Per-network override of sync_bans. None/unset defers to the XMPP account
 # or [settings]. Useful when this network's bot has no ops, or you do not
@@ -189,11 +190,16 @@ relaymsg_suffix = "xmpp"
 # real nicks. Unused unless puppet_mode is "nicks" or "auto". Defaults keep
 # today's RELAYMSG-or-prefix send path. Per-network [[irc]] keys drop the irc_
 # prefix (puppet_mode, max_puppets, ...). Public networks often cap clients
-# per IP; on an ircd you control, max_puppets = 0 and puppet_idle_seconds = 0
-# are reasonable. Connected nicks look like alice|xmpp ("|" is legal; "/" is not).
+# per IP; keep puppet_presence = "lazy" (JOIN on first speak, idle-QUIT while
+# lurking, PART on XMPP leave). On an ircd you control, puppet_presence =
+# "eager" plus max_puppets = 0 holds a nick for every occupant until they
+# leave; idle timeout is ignored. At cap, lazy LRU-QUITs the quietest puppet;
+# eager never evicts a live occupant (overflow is <nick> text from the bot).
+# Connected nicks look like alice|xmpp ("|" is legal; "/" is not).
 # irc_puppet_mode = "relaymsg"
 # irc_max_puppets = 16
 # irc_puppet_idle_seconds = 600
+# irc_puppet_presence = "lazy"   # or "eager"
 # irc_puppet_suffix = "xmpp"   # unset = inherit relaymsg_suffix; "" = unsuffixed
 # irc_puppet_separator = "|"
 

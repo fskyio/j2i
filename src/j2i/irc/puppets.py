@@ -11,6 +11,7 @@ from j2i.config import (
     IRCConfig,
     resolve_max_puppets,
     resolve_puppet_idle_seconds,
+    resolve_puppet_presence,
     resolve_puppet_separator,
     resolve_puppet_suffix,
 )
@@ -28,6 +29,11 @@ log = logging.getLogger(__name__)
 
 SelfMsgFactory = Callable[[str, IRCClient], SelfMsgCallback]
 Connector = Callable[[IRCConfig, str], Awaitable[IRCClient]]
+# irc_name, xmpp_nick, channels the socket was in
+DroppedCallback = Callable[[str, str, list[str]], Awaitable[None]]
+
+_SPAWN_RATE = 2.0  # new TCP connections per second per network
+_SPAWN_BURST = 2
 
 
 class NickInUse(Exception):
@@ -55,22 +61,33 @@ class IrcPuppetPool:
         masters: dict[str, IRCClient],
         *,
         on_self_message: SelfMsgFactory | None = None,
+        on_dropped: DroppedCallback | None = None,
         connector: Connector | None = None,
         connect_timeout: float = 15.0,
         clock: Callable[[], float] = time.monotonic,
+        spawn_rate: float = _SPAWN_RATE,
+        spawn_burst: int = _SPAWN_BURST,
     ) -> None:
         self.config = config
         self._masters = masters
         self._on_self_message = on_self_message
+        self._on_dropped = on_dropped
         self._connector = connector
         self.connect_timeout = connect_timeout
         self._clock = clock
+        self._spawn_rate = spawn_rate
+        self._spawn_burst = spawn_burst
         self._entries: dict[tuple[str, str], _PuppetEntry] = {}
         # irc_name -> casemapped nicks we currently own or are registering
         self._owned: dict[str, set[str]] = {}
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._stopping = False
         self._run_tasks: list[asyncio.Task] = []
+        # (irc_name, xmpp_nick, channel.lower()) kicked by IRC; no eager rejoin
+        self._kicked: set[tuple[str, str, str]] = set()
+        self._spawn_tokens: dict[str, float] = {}
+        self._spawn_updated: dict[str, float] = {}
+        self._spawn_locks: dict[str, asyncio.Lock] = {}
 
     def is_owned(self, irc_name: str, nick: str) -> bool:
         mapped = casemap_nick(nick, self._mapping(irc_name))
@@ -101,14 +118,109 @@ class IrcPuppetPool:
         )
 
     async def acquire(
-        self, irc_name: str, xmpp_nick: str, channel: str
+        self,
+        irc_name: str,
+        xmpp_nick: str,
+        channel: str,
+        *,
+        ignore_kick: bool = False,
     ) -> IRCClient | None:
         if self._stopping:
+            return None
+        ch = channel.lower()
+        if ignore_kick:
+            self.clear_kicked(irc_name, xmpp_nick, ch)
+        elif self.was_kicked(irc_name, xmpp_nick, ch):
             return None
         key = (irc_name, xmpp_nick)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             return await self._acquire_locked(irc_name, xmpp_nick, channel)
+
+    def was_kicked(self, irc_name: str, xmpp_nick: str, channel: str) -> bool:
+        return (irc_name, xmpp_nick, channel.lower()) in self._kicked
+
+    def clear_kicked(
+        self, irc_name: str, xmpp_nick: str, channel: str | None = None
+    ) -> None:
+        if channel is None:
+            self._kicked = {
+                k for k in self._kicked if k[:2] != (irc_name, xmpp_nick)
+            }
+            return
+        self._kicked.discard((irc_name, xmpp_nick, channel.lower()))
+
+    def touch(self, irc_name: str, xmpp_nick: str) -> None:
+        """Reset idle for a connected puppet (e.g. XMPP typing). No-op otherwise."""
+        entry = self._entries.get((irc_name, xmpp_nick))
+        if entry is None or entry.client is None:
+            return
+        self._touch(entry)
+
+    async def set_away(
+        self, irc_name: str, xmpp_nick: str, reason: str | None
+    ) -> None:
+        client = self.get_connected(irc_name, xmpp_nick)
+        if client is None:
+            return
+        await client.send_away(reason)
+
+    async def release(
+        self, irc_name: str, xmpp_nick: str, channel: str
+    ) -> None:
+        """PART ``channel``; QUIT the socket if it is in no channels afterwards."""
+        self.clear_kicked(irc_name, xmpp_nick, channel)
+        key = (irc_name, xmpp_nick)
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return
+            ch = channel.lower()
+            if ch in entry.channels and entry.client is not None:
+                try:
+                    await entry.client.part(channel)
+                except Exception as e:
+                    log.debug(
+                        "Error PARTing puppet %s from %s: %s",
+                        entry.irc_nick, channel, e,
+                    )
+            entry.channels.discard(ch)
+            if not entry.channels:
+                await self._drop(entry, "Left channel")
+
+    async def rename(
+        self, irc_name: str, old_nick: str, new_nick: str
+    ) -> None:
+        """Rekey a puppet to a new XMPP nick and NICK the IRC socket if connected."""
+        if old_nick == new_nick:
+            return
+        old_key = (irc_name, old_nick)
+        new_key = (irc_name, new_nick)
+        lock = self._locks.setdefault(old_key, asyncio.Lock())
+        async with lock:
+            entry = self._entries.get(old_key)
+            if entry is None:
+                return
+            existing = self._entries.get(new_key)
+            if existing is not None and existing is not entry:
+                await self._drop(existing, "Nick taken by rename")
+            if entry.client is not None:
+                await self._rename_irc_nick(entry, new_nick)
+            kicked = [
+                (n, x, ch) for n, x, ch in self._kicked
+                if n == irc_name and x == old_nick
+            ]
+            for item in kicked:
+                self._kicked.discard(item)
+                self._kicked.add((irc_name, new_nick, item[2]))
+            entry.xmpp_nick = new_nick
+            self._entries.pop(old_key, None)
+            self._entries[new_key] = entry
+            new_lock = self._locks.setdefault(new_key, asyncio.Lock())
+            if new_lock is not lock:
+                self._locks[new_key] = lock
+            self._locks.pop(old_key, None)
 
     async def _acquire_locked(
         self, irc_name: str, xmpp_nick: str, channel: str
@@ -171,6 +283,87 @@ class IrcPuppetPool:
         master = self._masters.get(irc_name)
         return master.casemapping if master is not None else "ascii"
 
+    def _is_eager(self, irc_name: str) -> bool:
+        try:
+            irc_cfg = self.config.irc_by_name(irc_name)
+        except KeyError:
+            return False
+        return resolve_puppet_presence(irc_cfg, self.config.settings) == "eager"
+
+    async def _rate_limit_spawn(self, irc_name: str) -> None:
+        if self._spawn_rate <= 0:
+            return
+        lock = self._spawn_locks.setdefault(irc_name, asyncio.Lock())
+        async with lock:
+            now = self._clock()
+            tokens = self._spawn_tokens.get(irc_name, float(self._spawn_burst))
+            last = self._spawn_updated.get(irc_name, now)
+            tokens = min(
+                float(self._spawn_burst),
+                tokens + (now - last) * self._spawn_rate,
+            )
+            if tokens < 1:
+                wait = (1.0 - tokens) / self._spawn_rate
+                await asyncio.sleep(wait)
+                now = self._clock()
+                tokens = 1.0
+            self._spawn_tokens[irc_name] = tokens - 1.0
+            self._spawn_updated[irc_name] = now
+
+    async def _rename_irc_nick(
+        self, entry: _PuppetEntry, new_xmpp_nick: str
+    ) -> None:
+        client = entry.client
+        if client is None:
+            return
+        irc_cfg = self.config.irc_by_name(entry.irc_name)
+        master = self._masters.get(entry.irc_name)
+        nicklen = master.nick_len if master is not None else DEFAULT_NICK_LEN
+        suffix = resolve_puppet_suffix(irc_cfg, self.config.settings)
+        separator = resolve_puppet_separator(irc_cfg, self.config.settings)
+        identity = puppet_identity(entry.irc_name, new_xmpp_nick)
+        mapping = self._mapping(entry.irc_name)
+        old_irc = entry.irc_nick
+        self._release_nick(entry.irc_name, old_irc)
+        taken = self._taken(entry.irc_name)
+        nick = allocate_puppet_nick(
+            new_xmpp_nick,
+            suffix=suffix,
+            separator=separator,
+            nicklen=nicklen,
+            taken=taken,
+            identity=identity,
+            mapping=mapping,
+        )
+        if nick is None:
+            self._reserve(entry.irc_name, old_irc)
+            return
+        self._reserve(entry.irc_name, nick)
+        ok = await client.change_nick(nick)
+        if ok:
+            entry.irc_nick = client.nick
+            if casemap_nick(client.nick, mapping) != casemap_nick(nick, mapping):
+                self._release_nick(entry.irc_name, nick)
+                self._reserve(entry.irc_name, client.nick)
+            return
+        self._release_nick(entry.irc_name, nick)
+        fallback = collision_puppet_nick(
+            new_xmpp_nick, identity, nicklen, separator,
+        )
+        if (
+            casemap_nick(fallback, mapping) in self._taken(entry.irc_name)
+            or casemap_nick(fallback, mapping) == casemap_nick(nick, mapping)
+        ):
+            self._reserve(entry.irc_name, old_irc)
+            return
+        self._reserve(entry.irc_name, fallback)
+        ok = await client.change_nick(fallback)
+        if ok:
+            entry.irc_nick = client.nick
+            return
+        self._release_nick(entry.irc_name, fallback)
+        self._reserve(entry.irc_name, old_irc)
+
     def _reserve(self, irc_name: str, irc_nick: str) -> None:
         mapped = casemap_nick(irc_nick, self._mapping(irc_name))
         self._owned.setdefault(irc_name, set()).add(mapped)
@@ -203,6 +396,8 @@ class IrcPuppetPool:
             irc_cfg = self.config.irc_by_name(entry.irc_name)
         except KeyError:
             return
+        if self._is_eager(entry.irc_name):
+            return
         idle = resolve_puppet_idle_seconds(irc_cfg, self.config.settings)
         if idle <= 0:
             return
@@ -232,6 +427,8 @@ class IrcPuppetPool:
         ]
         if len(live) < cap:
             return True
+        if self._is_eager(irc_name):
+            return False
         evictable = [e for e in live if e.client is not None]
         if not evictable:
             return False
@@ -261,6 +458,7 @@ class IrcPuppetPool:
         if nick is None:
             raise RuntimeError("no free puppet nick")
 
+        await self._rate_limit_spawn(entry.irc_name)
         self._reserve(entry.irc_name, nick)
         entry.irc_nick = nick
         try:
@@ -332,7 +530,9 @@ class IrcPuppetPool:
         entry.channels.add(key)
 
     async def _on_kicked(self, entry: _PuppetEntry, channel: str) -> None:
-        entry.channels.discard(channel.lower())
+        ch = channel.lower()
+        self._kicked.add((entry.irc_name, entry.xmpp_nick, ch))
+        entry.channels.discard(ch)
         if not entry.channels:
             await self._drop(entry, "kicked")
 
@@ -341,7 +541,17 @@ class IrcPuppetPool:
             "IRC puppet %s on %s disconnected",
             entry.irc_nick, entry.irc_name,
         )
+        channels = list(entry.channels)
+        irc_name = entry.irc_name
+        xmpp_nick = entry.xmpp_nick
         self._forget(entry)
+        if self._on_dropped is not None and not self._stopping:
+            try:
+                await self._on_dropped(irc_name, xmpp_nick, channels)
+            except Exception as e:
+                log.debug(
+                    "on_dropped for %s/%s failed: %s", irc_name, xmpp_nick, e
+                )
 
     async def _drop(self, entry: _PuppetEntry, reason: str) -> None:
         if entry.idle_handle is not None:

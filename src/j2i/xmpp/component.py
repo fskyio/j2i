@@ -11,9 +11,10 @@ import slixmpp
 from j2i.xmpp.avatar import Avatar
 from j2i.xmpp.client import (
     XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback,
-    ReactionCallback, _NS_REACTIONS, _NS_HINTS, configure_software_identity,
-    extract_stanza_id,
+    ReactionCallback, OccupantCallback, _NS_REACTIONS, _NS_HINTS,
+    configure_software_identity, extract_stanza_id,
 )
+from j2i.xmpp.presence import OccupantEvent, muc_user_info, occupant_event_from_presence
 
 ReconnectedCallback = Callable[[], Awaitable[None]]
 # muc_jid, puppet_jid, irc_nick, reason, actor
@@ -30,24 +31,7 @@ def _muc_user_info(
     xml,
 ) -> tuple[set[str], str | None, str | None]:
     """Parse muc#user status codes, ban reason, and actor from a presence XML."""
-    muc_x = xml.find(f"{{{_NS_MUC_USER}}}x")
-    if muc_x is None:
-        return set(), None, None
-    codes = {
-        s.get("code")
-        for s in muc_x.findall(f"{{{_NS_MUC_USER}}}status")
-        if s.get("code")
-    }
-    item = muc_x.find(f"{{{_NS_MUC_USER}}}item")
-    reason = None
-    actor = None
-    if item is not None:
-        reason_el = item.find(f"{{{_NS_MUC_USER}}}reason")
-        if reason_el is not None and reason_el.text:
-            reason = reason_el.text.strip() or None
-        actor_el = item.find(f"{{{_NS_MUC_USER}}}actor")
-        if actor_el is not None:
-            actor = actor_el.get("nick") or actor_el.get("jid") or None
+    codes, reason, actor, _ = muc_user_info(xml)
     return codes, reason, actor
 
 
@@ -106,6 +90,7 @@ class XMPPComponent:
         self.on_reaction: ReactionCallback | None = None
         self.on_reconnected: ReconnectedCallback | None = None
         self.on_puppet_banned: PuppetBannedCallback | None = None
+        self.on_occupant: OccupantCallback | None = None
 
         self._xmpp = slixmpp.ComponentXMPP(
             component_domain, password, component_host, component_port
@@ -467,10 +452,11 @@ class XMPPComponent:
         if stanza["type"] == "error" and to_bare != self._master_jid:
             asyncio.ensure_future(self._on_presence_error(stanza))
 
-        # Master kicked or banned from MUC
+        # Master kicked or banned from MUC, or a real occupant left/renamed
         elif stanza["type"] == "unavailable" and to_bare == self._master_jid:
-            codes, _, _ = _muc_user_info(stanza.xml)
-            if codes:
+            event = occupant_event_from_presence(stanza, self.nick)
+            if event is not None and event.is_self:
+                codes, _, _ = _muc_user_info(stanza.xml)
                 muc_jid = str(stanza["from"].bare)
                 if "307" in codes:
                     log.warning(
@@ -479,14 +465,14 @@ class XMPPComponent:
                     asyncio.ensure_future(self._rejoin_after_kick(muc_jid))
                 elif "301" in codes:
                     log.warning("Master JID banned from %s, not rejoining", muc_jid)
+            elif event is not None:
+                self._emit_occupant(event)
 
         # Puppet kicked or banned from MUC (presence addressed to the puppet)
         elif stanza["type"] == "unavailable" and to_bare != self._master_jid:
             self._on_puppet_unavailable(stanza)
 
-        # Auto-voice: grant voice to puppets that have role=visitor
-        # This fires on puppet join to moderated rooms AND when a room
-        # becomes moderated while puppets are already in it.
+        # Occupant available (and auto-voice for puppets)
         elif stanza["type"] in ("", "available") and to_bare == self._master_jid:
             nick = stanza["from"].resource
             muc_jid = str(stanza["from"].bare)
@@ -497,8 +483,22 @@ class XMPPComponent:
                     item = muc_x.find(f"{{{_NS_MUC_USER}}}item")
                     if item is not None and item.get("role") == "visitor":
                         asyncio.ensure_future(self._voice_puppet(muc_jid, nick))
+            else:
+                event = occupant_event_from_presence(stanza, self.nick)
+                if event is not None and not event.is_self:
+                    self._emit_occupant(event)
 
         return stanza
+
+    def _emit_occupant(self, event: OccupantEvent) -> None:
+        if self._is_puppet_echo(event.muc_jid.lower(), event.nick):
+            return
+        if event.new_nick and self._is_puppet_echo(
+            event.muc_jid.lower(), event.new_nick
+        ):
+            return
+        if self.on_occupant:
+            asyncio.ensure_future(self.on_occupant(event))
 
     def _on_puppet_unavailable(self, pres: slixmpp.Presence) -> None:
         """Handle a puppet's own unavailable presence (kick/ban/leave echo)."""

@@ -10,6 +10,7 @@ import slixmpp
 
 from j2i.version import CAPS_NODE, software_label, xep_0092_config
 from j2i.xmpp.avatar import Avatar
+from j2i.xmpp.presence import OccupantEvent, occupant_event_from_presence
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ SelfMessageCallback = Callable[[str, str, str, str | None], Awaitable[None]]
 TypingCallback = Callable[[str, str, bool], Awaitable[None]]
 # Reactions: (muc_jid, nick, stanza_id_ref, emojis)
 ReactionCallback = Callable[[str, str, str, "frozenset[str]"], Awaitable[None]]
+OccupantCallback = Callable[[OccupantEvent], Awaitable[None]]
 
 _NS_REACTIONS = "urn:xmpp:reactions:0"
 _NS_HINTS = "urn:xmpp:hints"
@@ -90,6 +92,7 @@ class XMPPClient:
         self.on_self_message: SelfMessageCallback | None = None
         self.on_typing: TypingCallback | None = None
         self.on_reaction: ReactionCallback | None = None
+        self.on_occupant: OccupantCallback | None = None
         self._mucs: list[str] = []
         self._connected = asyncio.Event()
         self._stopping = False
@@ -220,24 +223,21 @@ class XMPPClient:
         self._xmpp.connect()
 
     async def _on_groupchat_presence(self, pres: slixmpp.Presence) -> None:
-        if pres["type"] != "unavailable":
+        event = occupant_event_from_presence(pres, self.nick)
+        if event is None:
             return
-        muc_x = pres.xml.find("{http://jabber.org/protocol/muc#user}x")
-        if muc_x is None:
+        if event.is_self and event.kind == "leave":
+            muc_jid = event.muc_jid
+            if "307" in event.status_codes:
+                log.warning("Kicked from MUC %s, will rejoin in 5s", muc_jid)
+                asyncio.ensure_future(self._rejoin_muc(muc_jid))
+            elif "301" in event.status_codes:
+                log.warning("Banned from MUC %s, not rejoining", muc_jid)
             return
-        codes = {
-            s.get("code")
-            for s in muc_x.findall("{http://jabber.org/protocol/muc#user}status")
-        }
-        # code 110 = our own presence; code 307 = kicked; code 301 = banned
-        if "110" not in codes:
+        if event.is_self:
             return
-        muc_jid = str(pres["from"].bare)
-        if "307" in codes:
-            log.warning("Kicked from MUC %s, will rejoin in 5s", muc_jid)
-            asyncio.ensure_future(self._rejoin_muc(muc_jid))
-        elif "301" in codes:
-            log.warning("Banned from MUC %s, not rejoining", muc_jid)
+        if self.on_occupant:
+            await self.on_occupant(event)
 
     async def _rejoin_muc(self, muc_jid: str) -> None:
         await asyncio.sleep(5)
