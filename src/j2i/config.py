@@ -4,6 +4,12 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# How XMPP occupants are attributed on IRC (not whether rooms are bridged).
+PUPPET_MODES = frozenset({"relaymsg", "nicks", "auto", "prefix"})
+
+# Characters legal in an IRC nick; the puppet separator must be one of these.
+_NICK_CHAR = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-[]\\`^{}|()")
+
 
 @dataclass
 class XMPPConfig:
@@ -38,6 +44,13 @@ class IRCConfig:
     max_line_bytes: int | None = None
     # Sync XMPP puppet bans to IRC (+b and kick). None = defer to XMPP/global.
     sync_bans: bool | None = None
+    # IRC nick-puppet overrides (None = use the matching [settings] irc_* default)
+    puppet_mode: str | None = None
+    max_puppets: int | None = None
+    puppet_idle_seconds: int | None = None
+    # None = inherit suffix resolution; "" = unsuffixed nicks
+    puppet_suffix: str | None = None
+    puppet_separator: str | None = None
 
 
 @dataclass
@@ -74,6 +87,20 @@ class Settings:
     reply_style: str = "quote"
     # Suffix appended to spoofed nicks in RELAYMSG (e.g. spoofednick/xmpp)
     relaymsg_suffix: str = "xmpp"
+    # How XMPP occupants are attributed on IRC. "relaymsg" preserves today's
+    # send path (default). "nicks" uses extra TCP connections. "auto" tries
+    # RELAYMSG then nicks. "prefix" always sends <nick> text from the bot.
+    irc_puppet_mode: str = "relaymsg"
+    # Extra IRC connections for nick puppets. 0 = unlimited. Unused unless
+    # puppet_mode is "nicks" or "auto".
+    irc_max_puppets: int = 16
+    # QUIT idle puppets after this many seconds. 0 = never.
+    irc_puppet_idle_seconds: int = 600
+    # Suffix for connected puppet nicks (e.g. alice|xmpp). None = inherit
+    # relaymsg_suffix. "" = unsuffixed nicks.
+    irc_puppet_suffix: str | None = None
+    # Single legal nick character between base and suffix. "/" is not legal.
+    irc_puppet_separator: str = "|"
     # Avatar byte budget: the re-encoded image must fit under this so the
     # base64 vcard-temp stanza stays under the server's max stanza size.
     # This is the real, server-enforced limit (image dimensions are cosmetic).
@@ -160,3 +187,91 @@ def _validate(cfg: Config) -> None:
             raise ValueError(
                 f"XMPP config {x.name!r} requires a jid when component=false"
             )
+
+    _validate_puppet_mode("settings.irc_puppet_mode", cfg.settings.irc_puppet_mode)
+    _validate_puppet_separator(
+        "settings.irc_puppet_separator", cfg.settings.irc_puppet_separator
+    )
+    _validate_non_negative("settings.irc_max_puppets", cfg.settings.irc_max_puppets)
+    _validate_non_negative(
+        "settings.irc_puppet_idle_seconds", cfg.settings.irc_puppet_idle_seconds
+    )
+    if cfg.settings.irc_puppet_suffix:
+        _validate_nick_fragment(
+            "settings.irc_puppet_suffix", cfg.settings.irc_puppet_suffix
+        )
+
+    for i in cfg.irc:
+        if i.puppet_mode is not None:
+            _validate_puppet_mode(f"irc {i.name!r} puppet_mode", i.puppet_mode)
+        if i.puppet_separator is not None:
+            _validate_puppet_separator(
+                f"irc {i.name!r} puppet_separator", i.puppet_separator
+            )
+        if i.max_puppets is not None:
+            _validate_non_negative(f"irc {i.name!r} max_puppets", i.max_puppets)
+        if i.puppet_idle_seconds is not None:
+            _validate_non_negative(
+                f"irc {i.name!r} puppet_idle_seconds", i.puppet_idle_seconds
+            )
+        if i.puppet_suffix:
+            _validate_nick_fragment(f"irc {i.name!r} puppet_suffix", i.puppet_suffix)
+
+
+def _validate_puppet_mode(label: str, mode: str) -> None:
+    if mode not in PUPPET_MODES:
+        allowed = ", ".join(sorted(PUPPET_MODES))
+        raise ValueError(f"{label} must be one of: {allowed} (got {mode!r})")
+
+
+def _validate_puppet_separator(label: str, sep: str) -> None:
+    if len(sep) != 1 or sep not in _NICK_CHAR:
+        raise ValueError(
+            f"{label} must be a single legal IRC nick character "
+            f"(got {sep!r})"
+        )
+
+
+def _validate_nick_fragment(label: str, value: str) -> None:
+    if any(ch not in _NICK_CHAR for ch in value):
+        raise ValueError(f"{label} contains characters illegal in an IRC nick")
+
+
+def _validate_non_negative(label: str, value: int) -> None:
+    if value < 0:
+        raise ValueError(f"{label} must be >= 0 (got {value})")
+
+
+def resolve_puppet_mode(irc: IRCConfig, settings: Settings) -> str:
+    if irc.puppet_mode is not None:
+        return irc.puppet_mode
+    return settings.irc_puppet_mode
+
+
+def resolve_max_puppets(irc: IRCConfig, settings: Settings) -> int:
+    if irc.max_puppets is not None:
+        return irc.max_puppets
+    return settings.irc_max_puppets
+
+
+def resolve_puppet_idle_seconds(irc: IRCConfig, settings: Settings) -> int:
+    if irc.puppet_idle_seconds is not None:
+        return irc.puppet_idle_seconds
+    return settings.irc_puppet_idle_seconds
+
+
+def resolve_puppet_separator(irc: IRCConfig, settings: Settings) -> str:
+    if irc.puppet_separator is not None:
+        return irc.puppet_separator
+    return settings.irc_puppet_separator
+
+
+def resolve_puppet_suffix(irc: IRCConfig, settings: Settings) -> str:
+    """Empty string means unsuffixed nicks; None at every layer inherits RELAYMSG."""
+    if irc.puppet_suffix is not None:
+        return irc.puppet_suffix
+    if settings.irc_puppet_suffix is not None:
+        return settings.irc_puppet_suffix
+    if irc.relaymsg_suffix is not None:
+        return irc.relaymsg_suffix
+    return settings.relaymsg_suffix

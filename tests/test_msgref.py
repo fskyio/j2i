@@ -108,11 +108,12 @@ class TestCacheIsolation:
 
     async def test_irc_echo_round_trip_is_room_scoped(self):
         bridge = Bridge(Config())
+        client = IRCClient(host="h", port=6697, nick="bot")
         sid = xmpp_ref("x1", "room@c", "sid-1", by="room@c")
-        echo_key = ("libera", "#chan")
+        echo_key = bridge._echo_key(client, "#chan")
         bridge._pending_echo_sids[echo_key] = collections.deque([sid])
 
-        handler = bridge._make_irc_self_msg_handler("libera")
+        handler = bridge._make_irc_self_msg_handler("libera", client)
         await handler("#chan", "irc-msgid-1")
 
         irc = irc_ref("libera", "#chan", "irc-msgid-1")

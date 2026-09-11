@@ -7,8 +7,10 @@ import re
 from dataclasses import dataclass
 from typing import TypeVar
 
-from j2i.config import Config, BridgeMapping, IRCConfig
+from j2i.config import Config, BridgeMapping, IRCConfig, resolve_puppet_mode
 from j2i.irc.client import IRCClient, IRCMessage
+from j2i.irc.nicks import sanitize_irc_nick
+from j2i.irc.puppets import IrcPuppetPool
 from j2i.pastebin import upload as pastebin_upload
 from j2i.xmpp.avatar import Avatar, default_avatar_path
 from j2i.xmpp.client import XMPPClient, XMPPMessage
@@ -76,24 +78,12 @@ def _split_to_byte_limit(text: str, limit: int) -> list[str]:
 _RECONNECT_BASE = 2  # seconds
 _RECONNECT_MAX = 300  # 5 minutes
 
-# Characters legal in IRC nicks (broadly permissive, covers most ircds)
-_IRC_NICK_LEGAL = re.compile(r"[^a-zA-Z0-9_\-\[\]\\`^{}|()]")
-
 
 def anti_ping(nick: str) -> str:
     if len(nick) < 2:
         return nick
     mid = len(nick) // 2
     return nick[:mid] + ANTI_PING_CHAR + nick[mid:]
-
-
-def sanitize_irc_nick(nick: str) -> str:
-    sanitized = _IRC_NICK_LEGAL.sub("-", nick)
-    # Collapse consecutive dashes
-    sanitized = re.sub(r"-{2,}", "-", sanitized)
-    # Strip leading/trailing dashes
-    sanitized = sanitized.strip("-")
-    return sanitized or "unknown"
 
 
 def format_irc_to_xmpp(text: str) -> str:
@@ -297,9 +287,11 @@ class Bridge:
         self._xmpp_sid_to_irc_msgid: collections.OrderedDict[MsgRef, MsgRef] = (
             collections.OrderedDict()
         )
-        # Pending XMPP stanza-id refs awaiting IRC echo-message, per (irc_name, channel)
+        # Pending XMPP stanza-id refs awaiting IRC echo-message, per sending
+        # connection (id(client), channel). Master and each puppet are
+        # separate sockets, so they must not share a FIFO.
         self._pending_echo_sids: dict[
-            tuple[str, str], collections.deque[MsgRef]
+            tuple[int, str], collections.deque[MsgRef]
         ] = {}
 
         # Sender MUC occupant JID tracking for XEP-0461 reply "to" attribute
@@ -330,6 +322,7 @@ class Bridge:
         self._pending_body: dict[MsgRef, str] = {}
 
         self._stopping: bool = False
+        self.puppet_pool: IrcPuppetPool | None = None
 
     def _setting(self, b: BridgeMapping, name: str):
         """Resolve a setting: per-bridge override if set, else global."""
@@ -353,6 +346,46 @@ class Bridge:
             return xmpp_cfg.sync_bans
         return self.config.settings.sync_bans
 
+    def _puppet_mode(self, irc_cfg: IRCConfig) -> str:
+        return resolve_puppet_mode(irc_cfg, self.config.settings)
+
+    def _owned_irc_nick(self, irc_name: str, nick: str) -> bool:
+        return (
+            self.puppet_pool is not None
+            and self.puppet_pool.is_owned(irc_name, nick)
+        )
+
+    def _wants_relaymsg(
+        self, irc_cfg: IRCConfig, irc_client: IRCClient, channel: str
+    ) -> bool:
+        if self._puppet_mode(irc_cfg) in ("nicks", "prefix"):
+            return False
+        return bool(irc_cfg.relaymsg and irc_client.can_relaymsg(channel))
+
+    def _wants_puppet(
+        self, irc_cfg: IRCConfig, irc_client: IRCClient, channel: str
+    ) -> bool:
+        if self.puppet_pool is None:
+            return False
+        mode = self._puppet_mode(irc_cfg)
+        if mode == "nicks":
+            return True
+        if mode == "auto":
+            return not self._wants_relaymsg(irc_cfg, irc_client, channel)
+        return False
+
+    async def _maybe_puppet(
+        self,
+        irc_cfg: IRCConfig,
+        irc_client: IRCClient,
+        channel: str,
+        nick: str,
+    ) -> IRCClient | None:
+        if not self._wants_puppet(irc_cfg, irc_client, channel):
+            return None
+        assert self.puppet_pool is not None
+        return await self.puppet_pool.acquire(irc_cfg.name, nick, channel)
+
     def _cache_body(self, ref: MsgRef, body: str) -> None:
         """Store a message body in the bounded reply-excerpt cache."""
         _lru_put(self._body_cache, ref, body)
@@ -368,8 +401,17 @@ class Bridge:
         for client in self.xmpp_clients.values():
             client.stop()
 
+    async def shutdown(self) -> None:
+        if self.puppet_pool is not None:
+            await self.puppet_pool.shutdown()
+
     async def start(self) -> None:
         self._build_clients()
+        self.puppet_pool = IrcPuppetPool(
+            self.config,
+            self.irc_clients,
+            on_self_message=self._make_irc_self_msg_handler,
+        )
         self._build_lookup_tables()
         self._wire_callbacks()
         await self._connect_all()
@@ -462,7 +504,7 @@ class Bridge:
             client.on_typing = self._make_irc_typing_handler(irc_name)
             client.on_user_away = self._make_irc_away_handler(irc_name)
             client.on_self_kicked = self._make_irc_self_kicked_handler(irc_name, client)
-            client.on_self_message = self._make_irc_self_msg_handler(irc_name)
+            client.on_self_message = self._make_irc_self_msg_handler(irc_name, client)
             client.on_reaction = self._make_irc_reaction_handler(irc_name)
             # Presence callbacks for component-backed bridges
             client.on_user_join = self._make_irc_join_handler(irc_name)
@@ -475,6 +517,7 @@ class Bridge:
             client.on_message = self._make_xmpp_handler(xmpp_name)
             client.on_self_message = self._make_xmpp_self_msg_handler(xmpp_name)
             client.on_reaction = self._make_xmpp_reaction_handler(xmpp_name)
+            client.on_typing = self._make_xmpp_typing_handler(xmpp_name)
 
         for xmpp_name, component in self.xmpp_components.items():
             component.on_reconnected = self._make_xmpp_reconnect_handler(xmpp_name)
@@ -584,6 +627,8 @@ class Bridge:
     def _make_irc_message_handler(self, irc_name: str):
         async def handler(irc_msg: IRCMessage) -> None:
             channel, nick, text = irc_msg.channel, irc_msg.nick, irc_msg.text
+            if self._owned_irc_nick(irc_name, nick):
+                return
             text = format_irc_to_xmpp(text)
             key = (irc_name, channel.lower())
             bridges = self._irc_to_bridges.get(key, [])
@@ -660,6 +705,8 @@ class Bridge:
     def _make_irc_action_handler(self, irc_name: str):
         async def handler(irc_msg: IRCMessage) -> None:
             channel, nick, text = irc_msg.channel, irc_msg.nick, irc_msg.text
+            if self._owned_irc_nick(irc_name, nick):
+                return
             text = format_irc_to_xmpp(text)
             key = (irc_name, channel.lower())
             bridges = self._irc_to_bridges.get(key, [])
@@ -685,6 +732,8 @@ class Bridge:
 
     def _make_irc_typing_handler(self, irc_name: str):
         async def handler(channel: str, nick: str, is_typing: bool) -> None:
+            if self._owned_irc_nick(irc_name, nick):
+                return
             key = (irc_name, channel.lower())
             bridges = self._irc_to_bridges.get(key, [])
             for b in bridges:
@@ -715,6 +764,8 @@ class Bridge:
 
     def _make_irc_join_handler(self, irc_name: str):
         async def handler(channel: str, nick: str) -> None:
+            if self._owned_irc_nick(irc_name, nick):
+                return
             key = (irc_name, channel.lower())
             for b in self._irc_to_bridges.get(key, []):
                 args = self._puppet_args(b, irc_name, nick)
@@ -726,6 +777,8 @@ class Bridge:
 
     def _make_irc_part_handler(self, irc_name: str):
         async def handler(channel: str, nick: str) -> None:
+            if self._owned_irc_nick(irc_name, nick):
+                return
             key = (irc_name, channel.lower())
             for b in self._irc_to_bridges.get(key, []):
                 args = self._puppet_args(b, irc_name, nick)
@@ -737,6 +790,8 @@ class Bridge:
 
     def _make_irc_quit_handler(self, irc_name: str):
         async def handler(nick: str, channels: list[str]) -> None:
+            if self._owned_irc_nick(irc_name, nick):
+                return
             for channel in channels:
                 key = (irc_name, channel.lower())
                 for b in self._irc_to_bridges.get(key, []):
@@ -749,6 +804,10 @@ class Bridge:
 
     def _make_irc_nick_handler(self, irc_name: str):
         async def handler(old_nick: str, new_nick: str, channels: list[str]) -> None:
+            if self._owned_irc_nick(irc_name, old_nick) or self._owned_irc_nick(
+                irc_name, new_nick
+            ):
+                return
             for channel in channels:
                 key = (irc_name, channel.lower())
                 for b in self._irc_to_bridges.get(key, []):
@@ -795,6 +854,8 @@ class Bridge:
                 irc_cfg = self.config.irc_by_name(irc_name)
                 domain = xmpp_cfg.component_domain  # type: ignore[arg-type]
                 for nick in nicks:
+                    if self._owned_irc_nick(irc_name, nick):
+                        continue
                     pjid = _puppet_jid(nick, irc_cfg.name, domain)
                     asyncio.create_task(
                         component.join_puppet(b.xmpp_muc, pjid, nick)
@@ -841,6 +902,8 @@ class Bridge:
 
     def _make_irc_away_handler(self, irc_name: str):
         async def handler(nick: str, channels: list[str], reason: str | None) -> None:
+            if self._owned_irc_nick(irc_name, nick):
+                return
             for channel in channels:
                 key = (irc_name, channel.lower())
                 for b in self._irc_to_bridges.get(key, []):
@@ -855,11 +918,26 @@ class Bridge:
 
     def _make_xmpp_typing_handler(self, xmpp_name: str):
         async def handler(muc_jid: str, nick: str, is_typing: bool) -> None:
+            if xmpp_name in self.xmpp_components:
+                if self.xmpp_components[xmpp_name].is_puppet_nick(muc_jid, nick):
+                    return
             key = (xmpp_name, muc_jid.lower())
             bridges = self._xmpp_to_bridges.get(key, [])
             for b in bridges:
                 irc_client = self.irc_clients[b.irc]
-                await irc_client.send_typing(b.irc_channel, is_typing)
+                irc_cfg = self.config.irc_by_name(b.irc)
+                puppet = (
+                    self.puppet_pool.get_connected(b.irc, nick)
+                    if self.puppet_pool is not None
+                    else None
+                )
+                if puppet is not None:
+                    await puppet.send_typing(b.irc_channel, is_typing)
+                elif self._wants_puppet(irc_cfg, irc_client, b.irc_channel):
+                    # Don't spawn a socket just to type, and don't type as the bot.
+                    continue
+                else:
+                    await irc_client.send_typing(b.irc_channel, is_typing)
 
         return handler
 
@@ -894,11 +972,11 @@ class Bridge:
                 irc_client = self.irc_clients[b.irc]
                 irc_cfg = self.config.irc_by_name(b.irc)
                 if msg.is_action:
-                    await self._relay_action_to_irc(
+                    sender = await self._relay_action_to_irc(
                         irc_client, irc_cfg, b.irc_channel, msg, b, xmpp_name
                     )
                 else:
-                    await self._relay_to_irc(
+                    sender = await self._relay_to_irc(
                         irc_client, irc_cfg, b.irc_channel, msg, b, xmpp_name
                     )
                 if sid:
@@ -907,20 +985,29 @@ class Bridge:
                         sid,
                         f"{msg.muc_jid}/{msg.nick}",
                     )
-                    if irc_client.has_echo_message:
-                        echo_key = (b.irc, b.irc_channel.lower())
+                    # Queue keyed by sending connection so a puppet echo cannot
+                    # steal the master's pending sid (or vice versa).
+                    if sender.has_echo_message:
                         q = self._pending_echo_sids.setdefault(
-                            echo_key, collections.deque(maxlen=_NICK_MAP_SIZE)
+                            self._echo_key(sender, b.irc_channel),
+                            collections.deque(maxlen=_NICK_MAP_SIZE),
                         )
                         q.append(sid)
 
         return handler
 
-    def _make_irc_self_msg_handler(self, irc_name: str):
-        """Handle echo-message: map IRC msgid → XMPP stanza-id for reply threading."""
+    @staticmethod
+    def _echo_key(client: IRCClient, channel: str) -> tuple[int, str]:
+        return (id(client), channel.lower())
+
+    def _make_irc_self_msg_handler(self, irc_name: str, client: IRCClient):
+        """Handle echo-message: map IRC msgid → XMPP stanza-id for reply threading.
+
+        Bound to a single IRC connection (master or one puppet). Echoes on
+        that socket pop from that connection's queue only.
+        """
         async def handler(channel: str, msgid: str) -> None:
-            echo_key = (irc_name, channel.lower())
-            q = self._pending_echo_sids.get(echo_key)
+            q = self._pending_echo_sids.get(self._echo_key(client, channel))
             if q:
                 xmpp_sid = q.popleft()
                 irc_msgid = irc_ref(irc_name, channel, msgid)
@@ -985,12 +1072,20 @@ class Bridge:
                 is_native = not component.is_puppet_nick(msg.muc_jid, target)
             else:
                 is_native = True
-            if is_native and irc_cfg.relaymsg and irc_client.has_relaymsg:
-                target = _relaymsg_nick(
-                    target,
-                    irc_client.relaymsg_separator,
-                    irc_client.relaymsg_suffix,
+            if is_native:
+                mode = self._puppet_mode(irc_cfg)
+                use_nicks = mode == "nicks" or (
+                    mode == "auto"
+                    and not (irc_cfg.relaymsg and irc_client.has_relaymsg)
                 )
+                if use_nicks and self.puppet_pool is not None:
+                    target = self.puppet_pool.display_nick(irc_cfg.name, target)
+                elif irc_cfg.relaymsg and irc_client.has_relaymsg:
+                    target = _relaymsg_nick(
+                        target,
+                        irc_client.relaymsg_separator,
+                        irc_client.relaymsg_suffix,
+                    )
 
         style = self._setting(b, "reply_style")
         cached_body = self._body_cache.get(reply_ref) if reply_ref else None
@@ -1008,7 +1103,7 @@ class Bridge:
         msg: XMPPMessage,
         b: BridgeMapping,
         xmpp_name: str | None = None,
-    ) -> None:
+    ) -> IRCClient:
         text = msg.body
         if msg.is_correction:
             text = self._format_correction(text)
@@ -1025,12 +1120,16 @@ class Bridge:
         )
         irc_reply_to = irc_reply_ref.id if irc_reply_ref else None
 
+        puppet = await self._maybe_puppet(irc_cfg, irc_client, channel, msg.nick)
+        sender = puppet if puppet is not None else irc_client
+        as_puppet = puppet is not None
+
         # Split into logical lines, then break any line that would overflow
         # the IRC line-length limit into byte-sized pieces. The pieces count
         # as ordinary lines below, so an oversized paste still hits max_lines
         # (and thus the pastebin fallback) rather than flooding the channel.
         body_budget = self._irc_body_budget(
-            irc_client, irc_cfg, channel, msg, b, reply_prefix
+            sender, irc_cfg, channel, msg, b, reply_prefix, for_puppet=as_puppet,
         )
         lines: list[str] = []
         for logical_line in text.split("\n"):
@@ -1051,23 +1150,28 @@ class Bridge:
                 line_text = f"{reply_prefix}(long message) {paste_url}"
                 await self._send_irc_line(
                     irc_client, irc_cfg, channel, msg.nick, line_text, b,
-                    reply_to=irc_reply_to,
+                    reply_to=irc_reply_to, sender=puppet,
                 )
-                return
+                return sender
             # Fall through to truncated relay if upload fails
 
         if max_lines > 0:
             lines = lines[:max_lines]
 
         # Drop blank lines — IRC PRIVMSG bodies cannot be empty, and the
-        # plumbing format already conveys structure line-by-line.
+        # prefixed format already conveys structure line-by-line.
         non_blank = [line for line in lines if line.strip()]
 
-        # Try a single multiline BATCH for the plain PRIVMSG path. Ergo
-        # rejects RELAYMSG inside a multiline batch with MULTILINE_INVALID,
-        # so we keep RELAYMSG strictly per-line.
-        use_relaymsg = irc_cfg.relaymsg and irc_client.can_relaymsg(channel)
-        if not use_relaymsg and len(non_blank) > 1:
+        use_relaymsg = self._wants_relaymsg(irc_cfg, irc_client, channel) and not as_puppet
+        if as_puppet and len(non_blank) > 1:
+            first = reply_prefix + non_blank[0]
+            batch_lines = [first] + non_blank[1:]
+            if sender.can_multiline(batch_lines):
+                await sender.send_multiline_message(
+                    channel, batch_lines, reply_to=irc_reply_to,
+                )
+                return sender
+        if not use_relaymsg and not as_puppet and len(non_blank) > 1:
             display_nick = (
                 anti_ping(msg.nick)
                 if self._setting(b, "anti_ping")
@@ -1079,7 +1183,7 @@ class Bridge:
                 await irc_client.send_multiline_message(
                     channel, batch_lines, reply_to=irc_reply_to,
                 )
-                return
+                return irc_client
 
         for i, line in enumerate(non_blank):
             # Only prepend reply prefix and native reply tag to the first line
@@ -1087,8 +1191,9 @@ class Bridge:
             reply_tag = irc_reply_to if i == 0 else None
             await self._send_irc_line(
                 irc_client, irc_cfg, channel, msg.nick, f"{prefix}{line}", b,
-                reply_to=reply_tag,
+                reply_to=reply_tag, sender=puppet,
             )
+        return sender
 
     def _irc_body_budget(
         self,
@@ -1098,13 +1203,16 @@ class Bridge:
         msg: XMPPMessage,
         b: BridgeMapping,
         reply_prefix: str,
+        *,
+        for_puppet: bool = False,
     ) -> int:
         """Max UTF-8 bytes of message text that fit in one IRC line to `channel`.
 
         Starts from the line-length ceiling and subtracts everything the wire
         line carries besides the text itself: CRLF, the ``PRIVMSG <chan> :``
-        framing, the ``<nick> `` display prefix we prepend, the reply excerpt,
-        and a reserve for the source prefix the server adds when relaying onward.
+        framing, the ``<nick> `` display prefix we prepend (skipped for
+        connected puppets), the reply excerpt, and a reserve for the source
+        prefix the server adds when relaying onward.
 
         The ceiling is a ``max_line_bytes`` override resolved most-specific
         first — per-bridge, then per-IRC-network, then global — and finally the
@@ -1120,16 +1228,19 @@ class Bridge:
                 line_len = override
                 break
 
-        display_nick = (
-            anti_ping(msg.nick) if self._setting(b, "anti_ping") else msg.nick
-        )
+        nick_prefix = 0
+        if not for_puppet:
+            display_nick = (
+                anti_ping(msg.nick) if self._setting(b, "anti_ping") else msg.nick
+            )
+            nick_prefix = len(f"<{display_nick}> ".encode("utf-8"))
         overhead = (
             2  # trailing CRLF
             + _SOURCE_PREFIX_RESERVE
             + len(b"PRIVMSG ")
             + len(channel.encode("utf-8"))
             + len(b" :")
-            + len(f"<{display_nick}> ".encode("utf-8"))
+            + nick_prefix
             + len(reply_prefix.encode("utf-8"))
         )
         return max(_MIN_LINE_BUDGET, line_len - overhead)
@@ -1143,8 +1254,12 @@ class Bridge:
         text: str,
         b: BridgeMapping,
         reply_to: str | None = None,
+        sender: IRCClient | None = None,
     ) -> None:
-        if irc_cfg.relaymsg and irc_client.can_relaymsg(channel):
+        if sender is not None and sender is not irc_client:
+            await sender.send_message(channel, text, reply_to=reply_to)
+            return
+        if self._wants_relaymsg(irc_cfg, irc_client, channel):
             await irc_client.send_relaymsg(
                 channel, sanitize_irc_nick(nick), text, reply_to=reply_to
             )
@@ -1169,6 +1284,8 @@ class Bridge:
             is_unreact: bool,
         ) -> None:
             if not reply_to_msgid:
+                return
+            if self._owned_irc_nick(irc_name, nick):
                 return
             key = (irc_name, channel.lower())
             bridges = self._irc_to_bridges.get(key, [])
@@ -1250,6 +1367,7 @@ class Bridge:
             state = self._xmpp_reaction_state.setdefault(sid_ref, {})
             prev = state.get(nick, frozenset())
             added = emojis - prev
+            removed = prev - emojis
             state[nick] = emojis
 
             irc_msgid_ref = self._xmpp_sid_to_irc_msgid.get(sid_ref)
@@ -1258,7 +1376,30 @@ class Bridge:
             for b in bridges:
                 irc_client = self.irc_clients[b.irc]
                 irc_cfg = self.config.irc_by_name(b.irc)
-
+                puppet = await self._maybe_puppet(
+                    irc_cfg, irc_client, b.irc_channel, nick,
+                )
+                if puppet is not None and irc_msgid:
+                    native = True
+                    for emoji in added:
+                        if not await puppet.send_reaction(
+                            b.irc_channel, emoji, irc_msgid, unreact=False,
+                        ):
+                            native = False
+                            break
+                    if native:
+                        for emoji in removed:
+                            await puppet.send_reaction(
+                                b.irc_channel, emoji, irc_msgid, unreact=True,
+                            )
+                        continue
+                    # TAGMSG unavailable: attributed text from the puppet
+                    for emoji in added:
+                        text = self._format_reaction_text(b, sid_ref, emoji)
+                        await puppet.send_message(
+                            b.irc_channel, text, reply_to=irc_msgid,
+                        )
+                    continue
                 for emoji in added:
                     text = self._format_reaction_text(b, sid_ref, emoji)
                     await self._send_irc_line(
@@ -1276,7 +1417,7 @@ class Bridge:
         msg: XMPPMessage,
         b: BridgeMapping,
         xmpp_name: str | None = None,
-    ) -> None:
+    ) -> IRCClient:
         irc_reply_ref = (
             self._xmpp_sid_to_irc_msgid.get(
                 xmpp_ref(xmpp_name, msg.muc_jid, msg.reply_to_id)
@@ -1285,7 +1426,11 @@ class Bridge:
             else None
         )
         irc_reply_to = irc_reply_ref.id if irc_reply_ref else None
-        if irc_cfg.relaymsg and irc_client.can_relaymsg(channel):
+        puppet = await self._maybe_puppet(irc_cfg, irc_client, channel, msg.nick)
+        if puppet is not None:
+            await puppet.send_action(channel, msg.body, reply_to=irc_reply_to)
+            return puppet
+        if self._wants_relaymsg(irc_cfg, irc_client, channel):
             await irc_client.send_relaymsg(
                 channel,
                 sanitize_irc_nick(msg.nick),
@@ -1301,3 +1446,4 @@ class Bridge:
             await irc_client.send_message(
                 channel, f"* {display_nick} {msg.body}"
             )
+        return irc_client

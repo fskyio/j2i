@@ -82,6 +82,17 @@ relaymsg = true
 # fallback). Overrides the global settings.max_line_bytes for this network.
 # max_line_bytes = 900
 
+# How XMPP occupants are attributed on IRC (overrides [settings] irc_puppet_mode).
+# "relaymsg" (default): RELAYMSG if usable, else <nick> text from the bot.
+# "nicks": extra TCP connections, one per XMPP nick; never RELAYMSG.
+# "auto": RELAYMSG if usable, else nick puppets, else <nick> text.
+# "prefix": always <nick> text from the bot.
+# puppet_mode = "nicks"
+# max_puppets = 0              # 0 = unlimited extra connections
+# puppet_idle_seconds = 0      # 0 = never QUIT idle puppets
+# puppet_suffix = ""           # "" = unsuffixed nicks (alice); default inherits relaymsg_suffix
+# puppet_separator = "|"       # legal nick char between base and suffix (not "/")
+
 # Per-network override of sync_bans. None/unset defers to the XMPP account
 # or [settings]. Useful when this network's bot has no ops, or you do not
 # want XMPP bans to touch real IRC nicks here.
@@ -173,6 +184,18 @@ reply_style = "quote"
 # Global default suffix appended to spoofed nicks in RELAYMSG (e.g. alice/xmpp).
 # Individual networks can override this with relaymsg_suffix in their [[irc]] block.
 relaymsg_suffix = "xmpp"
+
+# IRC nick puppets (issue #4): extra TCP connections so XMPP users appear as
+# real nicks. Unused unless puppet_mode is "nicks" or "auto". Defaults keep
+# today's RELAYMSG-or-prefix send path. Per-network [[irc]] keys drop the irc_
+# prefix (puppet_mode, max_puppets, ...). Public networks often cap clients
+# per IP; on an ircd you control, max_puppets = 0 and puppet_idle_seconds = 0
+# are reasonable. Connected nicks look like alice|xmpp ("|" is legal; "/" is not).
+# irc_puppet_mode = "relaymsg"
+# irc_max_puppets = 16
+# irc_puppet_idle_seconds = 600
+# irc_puppet_suffix = "xmpp"   # unset = inherit relaymsg_suffix; "" = unsuffixed
+# irc_puppet_separator = "|"
 
 # Software identity (XEP-0092 version queries, XMPP resource, disco/caps name).
 # hide_version: announce "j2i" without the package version number.

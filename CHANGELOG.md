@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- IRC nick puppets: opt-in extra TCP connections so XMPP occupants speak as real IRC nicks (native reactions/typing), with a per-network pool, suffix/collision scheme, and no change to existing RELAYMSG configs (`irc_puppet_mode` defaults to `relaymsg`)
+
+### Fixed
+- Key IRC echo-message stanza-id queues per sending connection so a puppet echo cannot be mapped to a message the master (or another puppet) just sent
+
 ## [1.2.0b1] - 2026-09-08
 
 ### Added

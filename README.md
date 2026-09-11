@@ -5,7 +5,7 @@ A bridge between XMPP MUCs and IRC channels. Supports both basic plumbing (bot r
 ## Features
 
 - **Basic plumbing mode** - bridge bot relays messages in `<nick> text` format, works with any XMPP and IRC server
-- **Puppeteering** - XMPP users appear on IRC with their real nick via [RELAYMSG](https://raw.githubusercontent.com/ircv3/ircv3-specifications/66233655658dce029fc2a5184a0ab97201a4ceec/extensions/relaymsg.md); IRC users appear in XMPP MUCs as puppet JIDs via [XEP-0114 component](https://xmpp.org/extensions/xep-0114.html)
+- **Puppeteering** - XMPP users appear on IRC with their real nick via [RELAYMSG](https://raw.githubusercontent.com/ircv3/ircv3-specifications/66233655658dce029fc2a5184a0ab97201a4ceec/extensions/relaymsg.md) or opt-in nick puppets (extra IRC connections); IRC users appear in XMPP MUCs as puppet JIDs via [XEP-0114 component](https://xmpp.org/extensions/xep-0114.html)
 - **Ban syncing** - optional: when a component puppet is banned in a MUC, the corresponding IRC nick is given `+b` and kicked. Off by default (`sync_bans`)
 - **Smart replies** - XEP-0461 replies from XMPP become `nick: ` mentions or quoted on IRC; IRCv3 reply tags are preserved
 - **Reactions** - XMPP reactions (XEP-0444) are relayed to IRC as attributed text; IRC `+draft/react`/`+draft/unreact` tags are bridged natively to XMPP reactions
@@ -107,7 +107,7 @@ Copy `config.example.toml` and edit it. The example file has comments explaining
 The config has four sections:
 
 - `[[xmpp]]` - one entry per XMPP account or component; set `component = true` for XEP-0114 component mode
-- `[[irc]]` - one entry per IRC network; set `relaymsg = true` to enable RELAYMSG
+- `[[irc]]` - one entry per IRC network; set `relaymsg = true` to enable RELAYMSG, or `puppet_mode = "nicks"` for connected nick puppets
 - `[[bridge]]` - one entry per MUC↔channel pair, referencing the `name` fields above
 - `[settings]` - global defaults (`anti_ping`, `max_lines`, `pastebin`, etc.); can be overridden per `[[bridge]]`
 
@@ -117,9 +117,13 @@ Set `component = false` in `[[xmpp]]` and `relaymsg = false` in `[[irc]]`. The b
 
 ### Puppeteering mode (full setup)
 
-**IRC side:** Set `relaymsg = true` in `[[irc]]`. The IRC bot must have operator status (`+o`) in the channel. The bridge detects RELAYMSG support on connect and falls back to basic plumbing mode if unavailable.
+**IRC side (RELAYMSG):** Set `relaymsg = true` in `[[irc]]`. The IRC bot must have operator status (`+o`) in the channel. The bridge detects RELAYMSG support on connect and falls back to prefixed bot messages (`<nick> text`) if unavailable.
 
-**XMPP side:** Set `component = true` in `[[xmpp]]` and configure your XMPP server with a component subdomain. Each IRC user will appear in the MUC as a puppet JID under that domain (e.g. `johndoe.libera@irc.example.org`). Puppet nicks on IRC get a `/xmpp` suffix (e.g. `alice/xmpp`) to distinguish them from real IRC users.
+**IRC side (nick puppets):** Set `puppet_mode = "nicks"` (or `"auto"`) to connect a separate IRC nick per XMPP occupant. This is how you get native IRCv3 reactions and typing as that nick; RELAYMSG cannot send `TAGMSG`. Nicks look like `alice|xmpp` by default (`|` is legal in a real nick; `/` is not). Pool size and idle QUIT are per-network (`max_puppets`, `puppet_idle_seconds`; `0` means unlimited / never). Public networks often cap connections per IP — this is intended for small rooms or an ircd you control.
+
+`puppet_mode` values: `relaymsg` (default, current behaviour), `nicks` (never RELAYMSG), `auto` (RELAYMSG then nicks), `prefix` (always `<nick> text`). Existing configs that omit these keys are unchanged.
+
+**XMPP side:** Set `component = true` in `[[xmpp]]` and configure your XMPP server with a component subdomain. Each IRC user will appear in the MUC as a puppet JID under that domain (e.g. `johndoe.libera@irc.example.org`). RELAYMSG nicks on IRC get a `/xmpp` suffix (e.g. `alice/xmpp`) to distinguish them from real IRC users.
 
 Optional `sync_bans` (global, or per `[[xmpp]]` / `[[irc]]` / `[[bridge]]`) forwards a live MUC ban of a puppet to IRC as `MODE +b nick!*@*` plus `KICK`. The IRC bot needs channel operator status; if it does not have it, the failure is logged and ignored. Kicks-without-ban, unbans, and IRC→XMPP bans are not synced.
 

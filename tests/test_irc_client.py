@@ -40,6 +40,47 @@ class TestLineLen:
         _isupport(client, "UTF8ONLY", "NICKLEN=30")
         assert client.line_len == 512
         assert client.has_utf8only is True
+        assert client.nick_len == 30
+
+
+class TestNickLen:
+    def test_defaults_to_30(self):
+        assert _client().nick_len == 30
+
+    def test_nicklen_token_overrides_default(self):
+        client = _client()
+        _isupport(client, "NICKLEN=16")
+        assert client.nick_len == 16
+
+    def test_casemapping_recorded(self):
+        client = _client()
+        _isupport(client, "CASEMAPPING=rfc1459")
+        assert client.casemapping == "rfc1459"
+
+
+class TestSendReaction:
+    def test_returns_false_without_message_tags(self):
+        client = _client()
+        assert asyncio.run(
+            client.send_reaction("#c", "👍", "mid")
+        ) is False
+
+    def test_formats_tagmsg(self):
+        client = _client()
+        client.has_message_tags = True
+        sent: list[str] = []
+
+        async def capture(line: str) -> None:
+            sent.append(line)
+
+        client._send = capture  # type: ignore[method-assign]
+        assert asyncio.run(client.send_reaction("#c", "👍", "abc")) is True
+        assert sent == ["@+draft/react=👍;+reply=abc TAGMSG #c"]
+        sent.clear()
+        assert asyncio.run(
+            client.send_reaction("#c", "👍", "abc", unreact=True)
+        ) is True
+        assert sent == ["@+draft/unreact=👍;+reply=abc TAGMSG #c"]
 
 
 class TestBanAndKick:

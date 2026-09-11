@@ -4,6 +4,8 @@ These cover the nick-mangling and IRC->XMPP formatting logic that has the
 highest bug surface and no external dependencies.
 """
 
+import collections
+
 import pytest
 
 from j2i.bridge import (
@@ -11,7 +13,9 @@ from j2i.bridge import (
     Bridge,
     anti_ping,
     format_irc_to_xmpp,
+    irc_ref,
     sanitize_irc_nick,
+    xmpp_ref,
     _puppet_jid,
     _split_to_byte_limit,
 )
@@ -218,3 +222,88 @@ class TestIrcBodyBudget:
     def test_zero_and_none_are_treated_as_unset(self):
         # Zero global + None network/bridge => falls through to auto-detect.
         assert self._budget(line_len=800, global_mlb=0) == self._budget(line_len=800)
+
+    def test_puppet_sender_does_not_reserve_nick_prefix(self):
+        cfg = Config(settings=Settings(max_line_bytes=0))
+        bridge = Bridge(cfg)
+        client = IRCClient(host="h", port=6697, nick="bot")
+        client.line_len = 512
+        irc_cfg = IRCConfig(name="net", host="h", nick="bot")
+        b = BridgeMapping(
+            xmpp="x", xmpp_muc="m", irc="net", irc_channel="#c",
+            anti_ping=False,
+        )
+        msg = XMPPMessage(muc_jid="m", nick="alice", body="hi")
+        prefixed = bridge._irc_body_budget(client, irc_cfg, "#c", msg, b, "")
+        puppeted = bridge._irc_body_budget(
+            client, irc_cfg, "#c", msg, b, "", for_puppet=True,
+        )
+        assert puppeted - prefixed == len(b"<alice> ")
+
+
+class TestEchoSidMapping:
+    """IRC echo-message queues are per sending connection, not per network."""
+
+    def _bridge(self) -> Bridge:
+        return Bridge(Config(settings=Settings()))
+
+    def _queue(
+        self, bridge: Bridge, client: IRCClient, channel: str, sid
+    ) -> None:
+        q = bridge._pending_echo_sids.setdefault(
+            bridge._echo_key(client, channel),
+            collections.deque(),
+        )
+        q.append(sid)
+
+    @pytest.mark.asyncio
+    async def test_out_of_order_echoes_on_two_connections_do_not_cross(self):
+        bridge = self._bridge()
+        master = IRCClient(host="h", port=6697, nick="bot")
+        puppet = IRCClient(host="h", port=6697, nick="alice|xmpp")
+        channel = "#c"
+        sid_bot = xmpp_ref("x", "m", "sid-bot")
+        sid_alice = xmpp_ref("x", "m", "sid-alice")
+        self._queue(bridge, master, channel, sid_bot)
+        self._queue(bridge, puppet, channel, sid_alice)
+
+        await bridge._make_irc_self_msg_handler("net", puppet)(
+            channel, "msgid-alice"
+        )
+        await bridge._make_irc_self_msg_handler("net", master)(
+            channel, "msgid-bot"
+        )
+
+        assert bridge._xmpp_sid_to_irc_msgid[sid_alice] == irc_ref(
+            "net", channel, "msgid-alice"
+        )
+        assert bridge._xmpp_sid_to_irc_msgid[sid_bot] == irc_ref(
+            "net", channel, "msgid-bot"
+        )
+        assert bridge._irc_msgid_to_xmpp_sid[
+            irc_ref("net", channel, "msgid-alice")
+        ] == sid_alice
+        assert bridge._irc_msgid_to_xmpp_sid[
+            irc_ref("net", channel, "msgid-bot")
+        ] == sid_bot
+
+    @pytest.mark.asyncio
+    async def test_same_connection_fifo_is_preserved(self):
+        bridge = self._bridge()
+        master = IRCClient(host="h", port=6697, nick="bot")
+        channel = "#c"
+        sid_1 = xmpp_ref("x", "m", "sid-1")
+        sid_2 = xmpp_ref("x", "m", "sid-2")
+        self._queue(bridge, master, channel, sid_1)
+        self._queue(bridge, master, channel, sid_2)
+        handler = bridge._make_irc_self_msg_handler("net", master)
+
+        await handler(channel, "msgid-1")
+        await handler(channel, "msgid-2")
+
+        assert bridge._xmpp_sid_to_irc_msgid[sid_1] == irc_ref(
+            "net", channel, "msgid-1"
+        )
+        assert bridge._xmpp_sid_to_irc_msgid[sid_2] == irc_ref(
+            "net", channel, "msgid-2"
+        )

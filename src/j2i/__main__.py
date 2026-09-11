@@ -56,6 +56,7 @@ async def _run(bridge: Bridge) -> None:
 
     await bridge.start()
     await stop_event.wait()
+    await bridge.shutdown()
 
 
 if __name__ == "__main__":

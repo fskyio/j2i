@@ -7,6 +7,8 @@ import ssl
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable
 
+from j2i.irc.nicks import DEFAULT_NICK_LEN
+
 log = logging.getLogger(__name__)
 
 # Numerics that commonly follow a MODE +b / KICK the bot wasn't allowed to do.
@@ -88,6 +90,8 @@ class IRCClient:
     tls: bool = True
     sasl_password: str | None = None
     nickserv_password: str | None = None
+    # Extra connection used only to speak as an XMPP occupant
+    is_puppet: bool = False
 
     # Capabilities detected during negotiation
     has_relaymsg: bool = False
@@ -104,6 +108,9 @@ class IRCClient:
     bot_mode_char: str | None = None
     # Max IRC protocol line length in bytes (ISUPPORT LINELEN, default 512)
     line_len: int = 512
+    # Max nick length (ISUPPORT NICKLEN, default 30)
+    nick_len: int = DEFAULT_NICK_LEN
+    casemapping: str = "ascii"
     _has_sasl: bool = field(default=False, repr=False)
     _sasl_started: bool = field(default=False, repr=False)
     _sasl_done: bool = field(default=False, repr=False)
@@ -145,11 +152,19 @@ class IRCClient:
     _register_event: asyncio.Event = field(
         default_factory=asyncio.Event, repr=False
     )
+    _register_fail_event: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    _intentional_close: bool = field(default=False, repr=False)
+    nick_rejected: bool = field(default=False, repr=False)
 
     async def connect(self) -> None:
         # Reset state from any previous connection
         self._registered = False
         self._register_event.clear()
+        self._register_fail_event.clear()
+        self._intentional_close = False
+        self.nick_rejected = False
         self.has_relaymsg = False
         self.has_message_tags = False
         self.has_echo_message = False
@@ -160,6 +175,8 @@ class IRCClient:
         self.has_utf8only = False
         self.bot_mode_char = None
         self.line_len = 512
+        self.nick_len = DEFAULT_NICK_LEN
+        self.casemapping = "ascii"
         self._has_sasl = False
         self._sasl_started = False
         self._sasl_done = False
@@ -183,7 +200,8 @@ class IRCClient:
         # Start capability negotiation
         await self._send("CAP LS 302")
         await self._send(f"NICK {self.nick}")
-        await self._send(f"USER {self.nick} 0 * :{self.nick}")
+        ident = "j2i" if self.is_puppet else self.nick
+        await self._send(f"USER {ident} 0 * :{self.nick}")
 
     async def run(self) -> None:
         assert self._reader is not None
@@ -202,7 +220,7 @@ class IRCClient:
             log.warning("IRC connection error: %s", e)
         finally:
             self._close_writer()
-            if self.on_disconnect:
+            if self.on_disconnect and not self._intentional_close:
                 await self.on_disconnect()
 
     def _close_writer(self) -> None:
@@ -222,6 +240,34 @@ class IRCClient:
         await self._send(f"JOIN {channel}")
         self.channels.setdefault(channel.lower(), False)
 
+    async def part(self, channel: str) -> None:
+        await self._send(f"PART {channel}")
+        self.channels.pop(channel.lower(), None)
+        self._channel_members.pop(channel.lower(), None)
+
+    async def disconnect(self, reason: str = "Bridge shutting down") -> None:
+        """QUIT (if possible) and close without firing on_disconnect."""
+        self._intentional_close = True
+        if self._writer is not None:
+            try:
+                await self._send(f"QUIT :{reason}")
+            except OSError:
+                pass
+        self._close_writer()
+
+    async def wait_registered(self, timeout: float) -> bool:
+        """Wait until 001 or a nick rejection. Return True if registered."""
+        if self._registered:
+            return True
+        ok = asyncio.create_task(self._register_event.wait())
+        fail = asyncio.create_task(self._register_fail_event.wait())
+        done, pending = await asyncio.wait(
+            {ok, fail}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        return bool(self._registered)
+
     async def request_names(self, channel: str) -> None:
         await self._send(f"NAMES {channel}")
 
@@ -231,8 +277,11 @@ class IRCClient:
         tag_prefix = f"@+reply={reply_to} " if reply_to and self.has_message_tags else ""
         await self._send(f"{tag_prefix}PRIVMSG {channel} :{text}")
 
-    async def send_action(self, channel: str, text: str) -> None:
-        await self._send(f"PRIVMSG {channel} :\x01ACTION {text}\x01")
+    async def send_action(
+        self, channel: str, text: str, reply_to: str | None = None
+    ) -> None:
+        tag_prefix = f"@+reply={reply_to} " if reply_to and self.has_message_tags else ""
+        await self._send(f"{tag_prefix}PRIVMSG {channel} :\x01ACTION {text}\x01")
 
     async def send_relaymsg(
         self, channel: str, spoofed_nick: str, text: str,
@@ -290,6 +339,28 @@ class IRCClient:
         await self._send(f"MODE {channel} +b {nick}!*@*")
         kick_reason = reason or "Banned from XMPP MUC"
         await self._send(f"KICK {channel} {nick} :{kick_reason}")
+
+    async def send_reaction(
+        self,
+        channel: str,
+        emoji: str,
+        reply_to: str | None,
+        *,
+        unreact: bool = False,
+    ) -> bool:
+        """Send +draft/react or +draft/unreact. Return False if we cannot."""
+        if not self.has_message_tags or not reply_to:
+            return False
+        tag = "+draft/unreact" if unreact else "+draft/react"
+        escaped = (
+            emoji.replace("\\", "\\\\")
+            .replace(";", "\\:")
+            .replace(" ", "\\s")
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
+        await self._send(f"@{tag}={escaped};+reply={reply_to} TAGMSG {channel}")
+        return True
 
     async def _send(self, line: str) -> None:
         if self._writer is None:
@@ -364,13 +435,21 @@ class IRCClient:
 
         elif command == "001":
             # RPL_WELCOME - registration complete
+            if params:
+                self.nick = params[0]
             self._registered = True
             self._register_event.set()
             log.info("Registered as %s", self.nick)
-            if self.nickserv_password and not self._sasl_done:
+            if self.nickserv_password and not self._sasl_done and not self.is_puppet:
                 await self._send(
                     f"PRIVMSG NickServ :IDENTIFY {self.nickserv_password}"
                 )
+
+        elif command in ("432", "433", "436", "437"):
+            # Nick rejected / in use / collision / unavailable
+            log.warning("Nick %s rejected (%s): %s", self.nick, command, params)
+            self.nick_rejected = True
+            self._register_fail_event.set()
 
         elif command == "MODE":
             await self._handle_mode(params)
@@ -542,6 +621,18 @@ class IRCClient:
                 if length > 0:
                     self.line_len = length
                     log.info("Server advertises LINELEN=%d", length)
+            elif key == "NICKLEN":
+                try:
+                    length = int(value)
+                except ValueError:
+                    continue
+                if length > 0:
+                    self.nick_len = length
+                    log.info("Server advertises NICKLEN=%d", length)
+            elif key == "CASEMAPPING":
+                if value:
+                    self.casemapping = value.lower()
+                    log.info("Server casemapping=%s", self.casemapping)
             elif key == "BOT":
                 self.bot_mode_char = value if value else "B"
                 log.info("Server supports bot mode (mode char: %s)", self.bot_mode_char)
@@ -564,6 +655,8 @@ class IRCClient:
             for cap in cap_list.split():
                 cap_name = cap.split("=")[0]
                 if cap_name == "draft/relaymsg":
+                    if self.is_puppet:
+                        continue
                     self.has_relaymsg = True
                     if "=" in cap:
                         self.relaymsg_separator = cap.split("=", 1)[1][0]
@@ -609,7 +702,7 @@ class IRCClient:
                 elif cap_name == "away-notify":
                     self._pending_caps.append(cap_name)
                     log.info("away-notify supported")
-                elif cap_name == "sasl" and self.sasl_password:
+                elif cap_name == "sasl" and self.sasl_password and not self.is_puppet:
                     self._has_sasl = True
                     self._pending_caps.append(cap_name)
                     log.info("SASL supported, will authenticate")
