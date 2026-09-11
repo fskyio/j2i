@@ -18,11 +18,14 @@ from j2i.config import (
 from j2i.irc.client import IRCClient, SelfMsgCallback
 from j2i.irc.nicks import (
     DEFAULT_NICK_LEN,
+    DEFAULT_USER_LEN,
     allocate_puppet_nick,
     casemap_nick,
     collision_puppet_nick,
     preferred_puppet_nick,
     puppet_identity,
+    sanitize_irc_ident,
+    sanitize_irc_realname,
 )
 
 log = logging.getLogger(__name__)
@@ -166,9 +169,16 @@ class IrcPuppetPool:
         await client.send_away(reason)
 
     async def release(
-        self, irc_name: str, xmpp_nick: str, channel: str
+        self, irc_name: str, xmpp_nick: str, channel: str,
+        *,
+        quit_reason: str | None = None,
     ) -> None:
-        """PART ``channel``; QUIT the socket if it is in no channels afterwards."""
+        """PART ``channel``; QUIT the socket if it is in no channels afterwards.
+
+        ``quit_reason`` is used for MUC kick/ban: QUIT that reason when this
+        is the last channel, otherwise PART with the reason so other rooms
+        keep the nick.
+        """
         self.clear_kicked(irc_name, xmpp_nick, channel)
         key = (irc_name, xmpp_nick)
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -177,9 +187,12 @@ class IrcPuppetPool:
             if entry is None:
                 return
             ch = channel.lower()
+            if quit_reason and ch in entry.channels and len(entry.channels) <= 1:
+                await self._drop(entry, quit_reason)
+                return
             if ch in entry.channels and entry.client is not None:
                 try:
-                    await entry.client.part(channel)
+                    await entry.client.part(channel, quit_reason)
                 except Exception as e:
                     log.debug(
                         "Error PARTing puppet %s from %s: %s",
@@ -337,6 +350,7 @@ class IrcPuppetPool:
         )
         if nick is None:
             self._reserve(entry.irc_name, old_irc)
+            await client.send_setname(sanitize_irc_realname(new_xmpp_nick))
             return
         self._reserve(entry.irc_name, nick)
         ok = await client.change_nick(nick)
@@ -345,6 +359,7 @@ class IrcPuppetPool:
             if casemap_nick(client.nick, mapping) != casemap_nick(nick, mapping):
                 self._release_nick(entry.irc_name, nick)
                 self._reserve(entry.irc_name, client.nick)
+            await client.send_setname(sanitize_irc_realname(new_xmpp_nick))
             return
         self._release_nick(entry.irc_name, nick)
         fallback = collision_puppet_nick(
@@ -355,14 +370,17 @@ class IrcPuppetPool:
             or casemap_nick(fallback, mapping) == casemap_nick(nick, mapping)
         ):
             self._reserve(entry.irc_name, old_irc)
+            await client.send_setname(sanitize_irc_realname(new_xmpp_nick))
             return
         self._reserve(entry.irc_name, fallback)
         ok = await client.change_nick(fallback)
         if ok:
             entry.irc_nick = client.nick
+            await client.send_setname(sanitize_irc_realname(new_xmpp_nick))
             return
         self._release_nick(entry.irc_name, fallback)
         self._reserve(entry.irc_name, old_irc)
+        await client.send_setname(sanitize_irc_realname(new_xmpp_nick))
 
     def _reserve(self, irc_name: str, irc_nick: str) -> None:
         mapped = casemap_nick(irc_nick, self._mapping(irc_name))
@@ -462,7 +480,7 @@ class IrcPuppetPool:
         self._reserve(entry.irc_name, nick)
         entry.irc_nick = nick
         try:
-            client = await self._connect_client(irc_cfg, nick)
+            client = await self._connect_client(irc_cfg, nick, entry.xmpp_nick)
         except NickInUse:
             self._release_nick(entry.irc_name, nick)
             fallback = collision_puppet_nick(
@@ -475,7 +493,7 @@ class IrcPuppetPool:
                 raise
             self._reserve(entry.irc_name, fallback)
             entry.irc_nick = fallback
-            client = await self._connect_client(irc_cfg, fallback)
+            client = await self._connect_client(irc_cfg, fallback, entry.xmpp_nick)
 
         client.on_disconnect = lambda: self._on_unexpected_disconnect(entry)
         client.on_self_kicked = lambda ch: self._on_kicked(entry, ch)
@@ -493,18 +511,24 @@ class IrcPuppetPool:
         )
         return client
 
-    async def _connect_client(self, irc_cfg: IRCConfig, nick: str) -> IRCClient:
+    async def _connect_client(
+        self, irc_cfg: IRCConfig, nick: str, xmpp_nick: str,
+    ) -> IRCClient:
         if self._connector is not None:
             client = await self._connector(irc_cfg, nick)
             if getattr(client, "nick_rejected", False):
                 raise NickInUse(nick)
             return client
+        master = self._masters.get(irc_cfg.name)
+        userlen = master.user_len if master is not None else DEFAULT_USER_LEN
         client = IRCClient(
             host=irc_cfg.host,
             port=irc_cfg.port,
             nick=nick,
             tls=irc_cfg.tls,
             is_puppet=True,
+            ident=sanitize_irc_ident(xmpp_nick, userlen),
+            realname=sanitize_irc_realname(xmpp_nick),
         )
         await client.connect()
         task = asyncio.create_task(

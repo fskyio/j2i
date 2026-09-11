@@ -193,6 +193,72 @@ class TestChangeNick:
         assert client._register_event.is_set()
 
 
+class TestRegistrationUserLine:
+    def test_master_uses_nick_as_ident_and_gecos(self):
+        client = _client()
+        assert client.registration_user_line() == "USER bridge 0 * :bridge"
+
+    def test_puppet_defaults_to_j2i_ident(self):
+        client = IRCClient(host="h", port=1, nick="alice|xmpp", is_puppet=True)
+        assert client.registration_user_line() == "USER j2i 0 * :alice|xmpp"
+
+    def test_puppet_uses_xmpp_nick_as_gecos(self):
+        client = IRCClient(
+            host="h", port=1, nick="alice|xmpp", is_puppet=True,
+            ident="alice", realname="alice ✨",
+        )
+        assert client.registration_user_line() == "USER alice 0 * :alice ✨"
+
+
+class TestSetname:
+    def test_skipped_without_cap(self):
+        client = _client()
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        assert asyncio.run(client.send_setname("alice ✨")) is False
+        assert sent == []
+
+    def test_sends_when_cap_present(self):
+        client = _client()
+        client.has_setname = True
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        assert asyncio.run(client.send_setname("alice ✨")) is True
+        assert sent == ["SETNAME :alice ✨"]
+        assert client.realname == "alice ✨"
+
+
+class TestUserLen:
+    def test_defaults_to_10(self):
+        assert _client().user_len == 10
+
+    def test_userlen_token_overrides_default(self):
+        client = _client()
+        _isupport(client, "USERLEN=16")
+        assert client.user_len == 16
+
+
+class TestPartReason:
+    def test_optional_reason(self):
+        client = _client()
+        sent: list[str] = []
+
+        async def fake_send(line: str) -> None:
+            sent.append(line)
+
+        client._send = fake_send  # type: ignore[method-assign]
+        asyncio.run(client.part("#c", "Kicked from XMPP MUC"))
+        assert sent == ["PART #c :Kicked from XMPP MUC"]
+
+
 class TestChanopErrors:
     def test_logs_482(self, caplog):
         client = _client()

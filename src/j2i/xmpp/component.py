@@ -12,7 +12,7 @@ from j2i.xmpp.avatar import Avatar
 from j2i.xmpp.client import (
     XMPPMessage, MessageCallback, SelfMessageCallback, TypingCallback,
     ReactionCallback, OccupantCallback, _NS_REACTIONS, _NS_HINTS,
-    configure_software_identity, extract_stanza_id,
+    configure_software_identity, extract_stanza_id, incoming_xmpp_message,
 )
 from j2i.xmpp.presence import OccupantEvent, muc_user_info, occupant_event_from_presence
 
@@ -320,9 +320,9 @@ class XMPPComponent:
 
     async def send_puppet_action(
         self, muc_jid: str, puppet_jid: str, text: str
-    ) -> None:
+    ) -> str:
         """Send a /me action from a puppet JID (active chatstate included)."""
-        await self.send_puppet_message(muc_jid, puppet_jid, f"/me {text}")
+        return await self.send_puppet_message(muc_jid, puppet_jid, f"/me {text}")
 
     async def send_puppet_reply(
         self, muc_jid: str, puppet_jid: str, text: str, reply_to_id: str,
@@ -621,36 +621,9 @@ class XMPPComponent:
                     )
             return
 
-        body = msg["body"]
-        if not body:
+        xmpp_msg = incoming_xmpp_message(msg)
+        if xmpp_msg is None:
             return
-
-        is_correction = bool(msg["replace"]["id"])
-
-        reply_to_nick = None
-        reply_id = msg["reply"]["id"]
-        if reply_id:
-            body = msg["reply"].strip_fallback_content() or body
-            reply_to_jid = msg["reply"]["to"]
-            if reply_to_jid:
-                reply_to_nick = slixmpp.JID(reply_to_jid).resource
-
-        is_action = body.startswith("/me ")
-        if is_action:
-            body = body[4:]
-
-        stanza_id, stanza_id_by = extract_stanza_id(msg)
-        xmpp_msg = XMPPMessage(
-            muc_jid=muc_jid,
-            nick=nick,
-            body=body,
-            is_action=is_action,
-            reply_to_nick=reply_to_nick,
-            reply_to_id=reply_id or None,
-            is_correction=is_correction,
-            stanza_id=stanza_id,
-            stanza_id_by=stanza_id_by,
-        )
 
         if self.on_message:
             await self.on_message(xmpp_msg)

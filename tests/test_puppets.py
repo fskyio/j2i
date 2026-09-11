@@ -22,8 +22,10 @@ class FakeClient:
         self.channels: dict[str, bool] = {}
         self.joined: list[str] = []
         self.parted: list[str] = []
+        self.part_reasons: list[str | None] = []
         self.messages: list[tuple] = []
         self.away: list[str | None] = []
+        self.setnames: list[str] = []
         self.quit_reason: str | None = None
         self.nicks: list[str] = []
         self.on_disconnect = None
@@ -34,8 +36,9 @@ class FakeClient:
         self.joined.append(channel)
         self.channels[channel.lower()] = False
 
-    async def part(self, channel: str) -> None:
+    async def part(self, channel: str, reason: str | None = None) -> None:
         self.parted.append(channel)
+        self.part_reasons.append(reason)
         self.channels.pop(channel.lower(), None)
 
     async def send_message(self, channel, text, reply_to=None) -> None:
@@ -46,6 +49,10 @@ class FakeClient:
 
     async def send_away(self, reason: str | None) -> None:
         self.away.append(reason)
+
+    async def send_setname(self, realname: str) -> bool:
+        self.setnames.append(realname)
+        return True
 
     async def change_nick(self, new_nick: str, timeout: float = 10.0) -> bool:
         self.nicks.append(new_nick)
@@ -253,6 +260,34 @@ async def test_release_parts_one_channel_and_quits_the_last():
 
 
 @pytest.mark.asyncio
+async def test_release_quit_reason_on_last_channel():
+    async def connector(irc_cfg, nick):
+        return FakeClient(nick)
+
+    pool = _pool(_config(puppet_mode="nicks"), _master(), connector)
+    client = await pool.acquire("net", "alice", "#chan")
+    await pool.release("net", "alice", "#chan", quit_reason="Kicked from XMPP MUC")
+    assert client.parted == []
+    assert client.quit_reason == "Kicked from XMPP MUC"
+    assert pool.get_connected("net", "alice") is None
+
+
+@pytest.mark.asyncio
+async def test_release_quit_reason_parts_when_other_channels_remain():
+    async def connector(irc_cfg, nick):
+        return FakeClient(nick)
+
+    pool = _pool(_config(puppet_mode="nicks"), _master(), connector)
+    client = await pool.acquire("net", "alice", "#chan")
+    await pool.acquire("net", "alice", "#other")
+    await pool.release("net", "alice", "#chan", quit_reason="Kicked from XMPP MUC")
+    assert client.parted == ["#chan"]
+    assert client.part_reasons == ["Kicked from XMPP MUC"]
+    assert client.quit_reason is None
+    assert pool.get_connected("net", "alice") is client
+
+
+@pytest.mark.asyncio
 async def test_rename_rekeys_and_changes_irc_nick():
     async def connector(irc_cfg, nick):
         return FakeClient(nick)
@@ -261,6 +296,7 @@ async def test_rename_rekeys_and_changes_irc_nick():
     client = await pool.acquire("net", "alice", "#chan")
     await pool.rename("net", "alice", "alison")
     assert client.nick == "alison|xmpp"
+    assert client.setnames == ["alison"]
     assert pool.get_connected("net", "alice") is None
     assert pool.get_connected("net", "alison") is client
     assert pool.is_owned("net", "alison|xmpp")

@@ -7,7 +7,7 @@ import ssl
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable
 
-from j2i.irc.nicks import DEFAULT_NICK_LEN
+from j2i.irc.nicks import DEFAULT_NICK_LEN, DEFAULT_USER_LEN
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +92,10 @@ class IRCClient:
     nickserv_password: str | None = None
     # Extra connection used only to speak as an XMPP occupant
     is_puppet: bool = False
+    # USER username / GECOS. None = ident j2i (puppet) or nick (master);
+    # realname defaults to nick.
+    ident: str | None = None
+    realname: str | None = None
 
     # Capabilities detected during negotiation
     has_relaymsg: bool = False
@@ -103,6 +107,7 @@ class IRCClient:
     has_multiline: bool = False
     multiline_max_bytes: int = 0
     multiline_max_lines: int = 0
+    has_setname: bool = False
     # ISUPPORT tokens
     has_utf8only: bool = False
     bot_mode_char: str | None = None
@@ -110,6 +115,8 @@ class IRCClient:
     line_len: int = 512
     # Max nick length (ISUPPORT NICKLEN, default 30)
     nick_len: int = DEFAULT_NICK_LEN
+    # Max USER username length (ISUPPORT USERLEN, default 10)
+    user_len: int = DEFAULT_USER_LEN
     casemapping: str = "ascii"
     _has_sasl: bool = field(default=False, repr=False)
     _sasl_started: bool = field(default=False, repr=False)
@@ -178,10 +185,12 @@ class IRCClient:
         self.has_multiline = False
         self.multiline_max_bytes = 0
         self.multiline_max_lines = 0
+        self.has_setname = False
         self.has_utf8only = False
         self.bot_mode_char = None
         self.line_len = 512
         self.nick_len = DEFAULT_NICK_LEN
+        self.user_len = DEFAULT_USER_LEN
         self.casemapping = "ascii"
         self._has_sasl = False
         self._sasl_started = False
@@ -206,8 +215,13 @@ class IRCClient:
         # Start capability negotiation
         await self._send("CAP LS 302")
         await self._send(f"NICK {self.nick}")
-        ident = "j2i" if self.is_puppet else self.nick
-        await self._send(f"USER {ident} 0 * :{self.nick}")
+        await self._send(self.registration_user_line())
+
+    def registration_user_line(self) -> str:
+        """``USER`` line sent at registration (ident + GECOS)."""
+        ident = self.ident or ("j2i" if self.is_puppet else self.nick)
+        gecos = self.realname or self.nick
+        return f"USER {ident} 0 * :{gecos}"
 
     async def run(self) -> None:
         assert self._reader is not None
@@ -246,8 +260,11 @@ class IRCClient:
         await self._send(f"JOIN {channel}")
         self.channels.setdefault(channel.lower(), False)
 
-    async def part(self, channel: str) -> None:
-        await self._send(f"PART {channel}")
+    async def part(self, channel: str, reason: str | None = None) -> None:
+        if reason:
+            await self._send(f"PART {channel} :{reason}")
+        else:
+            await self._send(f"PART {channel}")
         self.channels.pop(channel.lower(), None)
         self._channel_members.pop(channel.lower(), None)
 
@@ -257,6 +274,14 @@ class IRCClient:
             await self._send("AWAY")
         else:
             await self._send(f"AWAY :{reason}")
+
+    async def send_setname(self, realname: str) -> bool:
+        """Update GECOS via SETNAME. Return False if the cap is unavailable."""
+        if not self.has_setname:
+            return False
+        self.realname = realname
+        await self._send(f"SETNAME :{realname}")
+        return True
 
     async def change_nick(self, new_nick: str, timeout: float = 10.0) -> bool:
         """Change nick after registration. Return True if the server accepted it."""
@@ -673,6 +698,14 @@ class IRCClient:
                 if length > 0:
                     self.nick_len = length
                     log.info("Server advertises NICKLEN=%d", length)
+            elif key == "USERLEN":
+                try:
+                    length = int(value)
+                except ValueError:
+                    continue
+                if length > 0:
+                    self.user_len = length
+                    log.info("Server advertises USERLEN=%d", length)
             elif key == "CASEMAPPING":
                 if value:
                     self.casemapping = value.lower()
@@ -743,6 +776,10 @@ class IRCClient:
                         "multiline supported (max-bytes=%d, max-lines=%d)",
                         self.multiline_max_bytes, self.multiline_max_lines,
                     )
+                elif cap_name == "setname":
+                    self.has_setname = True
+                    self._pending_caps.append(cap_name)
+                    log.info("setname supported")
                 elif cap_name == "away-notify":
                     self._pending_caps.append(cap_name)
                     log.info("away-notify supported")
@@ -863,7 +900,7 @@ class IRCClient:
             if self.on_action:
                 irc_msg = IRCMessage(
                     channel=target, nick=nick, text=action_text,
-                    is_action=True, msgid=msgid,
+                    is_action=True, msgid=msgid, reply_to_msgid=reply_to_msgid,
                 )
                 await self.on_action(irc_msg)
             return

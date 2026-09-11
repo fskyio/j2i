@@ -18,6 +18,8 @@ class OccupantEvent:
     # None = available / back; str (possibly empty) = away-like show
     away_reason: str | None = None
     status_codes: frozenset[str] = frozenset()
+    reason: str | None = None
+    actor: str | None = None
 
 
 def muc_user_info(
@@ -57,6 +59,8 @@ def parse_occupant_event(
     item_nick: str | None = None,
     show: str = "",
     status: str = "",
+    reason: str | None = None,
+    actor: str | None = None,
 ) -> OccupantEvent | None:
     """Classify a MUC presence as join, leave, or nick-change.
 
@@ -84,6 +88,8 @@ def parse_occupant_event(
             kind="leave",
             is_self=is_self,
             status_codes=code_set,
+            reason=reason,
+            actor=actor,
         )
 
     if ptype in ("", "available"):
@@ -107,7 +113,7 @@ def occupant_event_from_presence(pres, self_nick: str) -> OccupantEvent | None:
     nick = pres["from"].resource
     if not nick:
         return None
-    codes, _, _, item_nick = muc_user_info(pres.xml)
+    codes, reason, actor, item_nick = muc_user_info(pres.xml)
     return parse_occupant_event(
         muc_jid=str(pres["from"].bare),
         nick=nick,
@@ -117,4 +123,6 @@ def occupant_event_from_presence(pres, self_nick: str) -> OccupantEvent | None:
         item_nick=item_nick,
         show=pres["show"] or "",
         status=pres["status"] or "",
+        reason=reason,
+        actor=actor,
     )

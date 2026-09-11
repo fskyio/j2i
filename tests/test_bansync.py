@@ -5,7 +5,7 @@ from xml.etree.ElementTree import Element, SubElement
 
 from slixmpp import Presence
 
-from j2i.bridge import Bridge, _KICK_REASON_MAX, _ban_kick_reason
+from j2i.bridge import Bridge, _KICK_REASON_MAX, _ban_kick_reason, _kick_quit_reason
 from j2i.config import (
     BridgeMapping,
     Config,
@@ -123,6 +123,20 @@ class TestBanKickReason:
         text = _ban_kick_reason("x" * 200, "mod")
         assert len(text) == _KICK_REASON_MAX
         assert text.endswith("…")
+
+
+class TestKickQuitReason:
+    def test_default(self):
+        assert _kick_quit_reason(None, None) == "Kicked from XMPP MUC"
+
+    def test_reason_only(self):
+        assert _kick_quit_reason("trolling", None) == "Kicked from XMPP: trolling"
+
+    def test_actor_and_reason(self):
+        assert (
+            _kick_quit_reason("trolling", "mod")
+            == "Kicked from XMPP (mod): trolling"
+        )
 
 
 class TestSyncBansConfig:

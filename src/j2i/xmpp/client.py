@@ -26,6 +26,12 @@ class XMPPMessage:
     reply_to_id: str | None = None
     # Smart edits: this message is a correction of a previous one
     is_correction: bool = False
+    # XEP-0308 replace id (original stanza id, origin-id, or client id)
+    replace_id: str | None = None
+    # Client-generated message @id
+    client_id: str | None = None
+    # XEP-0359 origin-id, if present
+    origin_id: str | None = None
     # Server-assigned stanza-id (XEP-0359), used for reply threading
     stanza_id: str | None = None
     # XEP-0359 stanza-id `by` (generating entity, typically the MUC JID)
@@ -52,6 +58,48 @@ def extract_stanza_id(msg: slixmpp.Message) -> tuple[str | None, str | None]:
     if el is None:
         return None, None
     return el.get("id"), el.get("by")
+
+
+def extract_origin_id(msg: slixmpp.Message) -> str | None:
+    """Return the XEP-0359 ``origin-id``, or None."""
+    el = msg.xml.find(f"{{{_NS_SID}}}origin-id")
+    if el is None:
+        return None
+    return el.get("id")
+
+
+def incoming_xmpp_message(msg: slixmpp.Message) -> XMPPMessage | None:
+    """Parse a MUC groupchat stanza into an ``XMPPMessage``, or None if empty."""
+    body = msg["body"]
+    if not body:
+        return None
+    replace_id = msg["replace"]["id"] or None
+    reply_to_nick = None
+    reply_id = msg["reply"]["id"]
+    log.debug("Incoming message id=%s, reply_to_id=%s", msg["id"], reply_id)
+    if reply_id:
+        body = msg["reply"].strip_fallback_content() or body
+        reply_to_jid = msg["reply"]["to"]
+        if reply_to_jid:
+            reply_to_nick = slixmpp.JID(reply_to_jid).resource
+    is_action = body.startswith("/me ")
+    if is_action:
+        body = body[4:]
+    stanza_id, stanza_id_by = extract_stanza_id(msg)
+    return XMPPMessage(
+        muc_jid=str(msg["from"].bare),
+        nick=msg["mucnick"],
+        body=body,
+        is_action=is_action,
+        reply_to_nick=reply_to_nick,
+        reply_to_id=reply_id or None,
+        is_correction=bool(replace_id),
+        replace_id=replace_id,
+        client_id=msg["id"] or None,
+        origin_id=extract_origin_id(msg),
+        stanza_id=stanza_id,
+        stanza_id_by=stanza_id_by,
+    )
 
 
 def configure_software_identity(
@@ -263,45 +311,9 @@ class XMPPClient:
                     )
             return
 
-        body = msg["body"]
-        if not body:
+        xmpp_msg = incoming_xmpp_message(msg)
+        if xmpp_msg is None:
             return
-
-        muc_jid = str(msg["from"].bare)
-
-        # Detect correction (XEP-0308)
-        is_correction = bool(msg["replace"]["id"])
-
-        # Detect reply (XEP-0461) and extract reply-to nick
-        reply_to_nick = None
-        reply_id = msg["reply"]["id"]
-        log.debug("Incoming message id=%s, reply_to_id=%s", msg["id"], reply_id)
-        if reply_id:
-            # Strip the fallback quote from the body
-            body = msg["reply"].strip_fallback_content() or body
-            # The reply "to" attribute is the full JID of the replied-to message
-            # The resource part of a MUC JID is the nick
-            reply_to_jid = msg["reply"]["to"]
-            if reply_to_jid:
-                reply_to_nick = slixmpp.JID(reply_to_jid).resource
-
-        is_action = body.startswith("/me ")
-        if is_action:
-            body = body[4:]
-
-        stanza_id, stanza_id_by = extract_stanza_id(msg)
-        xmpp_msg = XMPPMessage(
-            muc_jid=muc_jid,
-            nick=nick,
-            body=body,
-            is_action=is_action,
-            reply_to_nick=reply_to_nick,
-            reply_to_id=reply_id or None,
-            is_correction=is_correction,
-            stanza_id=stanza_id,
-            stanza_id_by=stanza_id_by,
-        )
-
         if self.on_message:
             await self.on_message(xmpp_msg)
 

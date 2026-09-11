@@ -7,8 +7,12 @@ import re
 _IRC_NICK_ILLEGAL = re.compile(r"[^a-zA-Z0-9_\-\[\]\\`^{}|()]")
 
 DEFAULT_NICK_LEN = 30
+# Historical ident/USERLEN default; ISUPPORT USERLEN overrides per-network.
+DEFAULT_USER_LEN = 10
 _HASH_LEN = 7
 _FALLBACK_SEP = "|"
+_REALNAME_MAX = 80
+_IRC_IDENT_ILLEGAL = re.compile(r"[^a-zA-Z0-9._-]")
 
 
 def sanitize_irc_nick(nick: str) -> str:
@@ -16,6 +20,24 @@ def sanitize_irc_nick(nick: str) -> str:
     sanitized = re.sub(r"-{2,}", "-", sanitized)
     sanitized = sanitized.strip("-")
     return sanitized or "unknown"
+
+
+def sanitize_irc_ident(nick: str, userlen: int = DEFAULT_USER_LEN) -> str:
+    """Build a USER username from an XMPP nick, truncated to ``userlen``."""
+    userlen = max(1, userlen)
+    ident = _IRC_IDENT_ILLEGAL.sub("-", nick)
+    ident = re.sub(r"-{2,}", "-", ident).strip("-.")
+    ident = ident[:userlen].rstrip("-.")
+    return ident or "j2i"
+
+
+def sanitize_irc_realname(nick: str) -> str:
+    """Flatten an XMPP nick into a GECOS/SETNAME realname."""
+    text = nick.replace("\n", " ").replace("\r", " ").replace("\0", " ").strip()
+    text = re.sub(r" +", " ", text)
+    if len(text) > _REALNAME_MAX:
+        text = text[: _REALNAME_MAX - 1] + "…"
+    return text or "xmpp"
 
 
 def casemap_nick(nick: str, mapping: str = "ascii") -> str:

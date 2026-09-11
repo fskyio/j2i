@@ -67,6 +67,22 @@ class TestParseOccupantEvent:
         assert ev.kind == "leave"
         assert ev.is_self is False
 
+    def test_kick_307_keeps_reason(self):
+        ev = parse_occupant_event(
+            muc_jid="room@c",
+            nick="alice",
+            ptype="unavailable",
+            self_nick="bot",
+            codes={"307"},
+            reason="trolling",
+            actor="mod",
+        )
+        assert ev is not None
+        assert ev.kind == "leave"
+        assert "307" in ev.status_codes
+        assert ev.reason == "trolling"
+        assert ev.actor == "mod"
+
     def test_nick_change_303(self):
         ev = parse_occupant_event(
             muc_jid="room@c",

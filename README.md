@@ -9,7 +9,7 @@ A bridge between XMPP MUCs and IRC channels. Supports both basic plumbing (bot r
 - **Ban syncing** - optional: when a component puppet is banned in a MUC, the corresponding IRC nick is given `+b` and kicked. Off by default (`sync_bans`)
 - **Smart replies** - XEP-0461 replies from XMPP become IRCv3 `+reply` from nick puppets (no quote prefix when the msgid is known), or `nick: ` / quoted text for RELAYMSG and bot-relay; IRCv3 reply tags are preserved
 - **Reactions** - XMPP reactions (XEP-0444) are relayed to IRC as attributed text; IRC `+draft/react`/`+draft/unreact` tags are bridged natively to XMPP reactions
-- **Message edits** - XEP-0308 corrections are relayed to IRC as `* corrected text`
+- **Message edits** - XEP-0308 corrections are relayed to IRC as `* corrected text`, with IRCv3 `+reply` pointing at the original when its msgid is known
 - **Pastebin** - messages exceeding a configurable line limit are uploaded to a pastebin and linked instead of flooding
 - **Typing indicators** - XEP-0085 (XMPP) ↔ IRCv3 typing tag
 - **Multiline messages** - IRCv3 [draft/multiline](https://ircv3.net/specs/extensions/multiline) batches are joined into a single XMPP message; multi-line XMPP messages are sent to IRC as one batch when supported, with per-line fallback otherwise
@@ -121,7 +121,9 @@ Set `component = false` in `[[xmpp]]` and `relaymsg = false` in `[[irc]]`. The b
 
 **IRC side (nick puppets):** Set `puppet_mode = "nicks"` (or `"auto"`) to connect a separate IRC nick per XMPP occupant. This is how you get native IRCv3 reactions and typing as that nick; RELAYMSG cannot send `TAGMSG`. Nicks look like `alice|xmpp` by default (`|` is legal in a real nick; `/` is not). Pool size and idle QUIT are per-network (`max_puppets`, `puppet_idle_seconds`; `0` means unlimited / never). Public networks often cap connections per IP — this is intended for small rooms or an ircd you control.
 
-`puppet_presence` (default `lazy`): JOIN on first speak/react, idle-QUIT while the occupant is still lurking in the MUC, and PART immediately when they leave (or are kicked/banned). Set `eager` to JOIN on MUC presence so `/names` matches the room; idle timeout is ignored, and a full pool never evicts someone still present (extra occupants overflow to prefixed bot text). Eager is for an ircd you control (`max_puppets = 0`, or a cap at least as large as the room).
+`puppet_presence` (default `lazy`): JOIN on first speak/react, idle-QUIT while the occupant is still lurking in the MUC, and PART immediately when they leave. A MUC kick or ban QUITs the IRC nick (or PARTs that channel with the kick/ban reason if the puppet is in other channels). Set `eager` to JOIN on MUC presence so `/names` matches the room; idle timeout is ignored, and a full pool never evicts someone still present (extra occupants overflow to prefixed bot text). Eager is for an ircd you control (`max_puppets = 0`, or a cap at least as large as the room).
+
+Nick puppets register with the original MUC nick as GECOS (`/whois` realname) so sanitized IRC nicks remain attributable. MUC nick changes also `SETNAME` when the network supports it.
 
 `puppet_mode` values: `relaymsg` (default, current behaviour), `nicks` (never RELAYMSG), `auto` (RELAYMSG then nicks), `prefix` (always `<nick> text`). Existing configs that omit these keys are unchanged.
 

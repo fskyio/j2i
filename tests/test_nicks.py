@@ -10,7 +10,9 @@ from j2i.irc.nicks import (
     preferred_puppet_nick,
     prepare_base_nick,
     puppet_identity,
+    sanitize_irc_ident,
     sanitize_irc_nick,
+    sanitize_irc_realname,
 )
 
 
@@ -132,3 +134,28 @@ class TestSanitizeStillWorks:
 
     def test_default_nick_len(self):
         assert DEFAULT_NICK_LEN == 30
+
+
+class TestSanitizeIdent:
+    def test_plain(self):
+        assert sanitize_irc_ident("alice") == "alice"
+
+    def test_spaces_and_illegal(self):
+        assert sanitize_irc_ident("alice ✨") == "alice"
+
+    def test_truncates_to_userlen(self):
+        assert sanitize_irc_ident("verylongusername", 10) == "verylongus"
+
+    def test_empty_falls_back(self):
+        assert sanitize_irc_ident("!!!") == "j2i"
+
+
+class TestSanitizeRealname:
+    def test_keeps_unicode_nick(self):
+        assert sanitize_irc_realname("alice ✨") == "alice ✨"
+
+    def test_flattens_newlines(self):
+        assert sanitize_irc_realname("a\nb") == "a b"
+
+    def test_empty_falls_back(self):
+        assert sanitize_irc_realname("   ") == "xmpp"
