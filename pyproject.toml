@@ -32,8 +32,8 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://fsky.io/projects/j2i/"
-Repository = "https://foundry.fsky.io/fsky/j2i.git"
-Issues = "https://foundry.fsky.io/fsky/j2i/issues"
+Repository = "https://gitfield.org/fsky/j2i.git"
+Issues = "https://gitfield.org/fsky/j2i/issues"
 
 [project.scripts]
 j2i = "j2i.__main__:main"
@@ -53,7 +53,7 @@ requires = ["uv_build>=0.10.12,<0.11.0"]
 build-backend = "uv_build"
 
 [[tool.uv.index]]
-name = "foundry"
-url = "https://foundry.fsky.io/api/packages/fsky/pypi/simple/"
-publish-url = "https://foundry.fsky.io/api/packages/fsky/pypi/"
+name = "gitfield"
+url = "https://gitfield.org/api/packages/fsky/pypi/simple/"
+publish-url = "https://gitfield.org/api/packages/fsky/pypi/"
 explicit = true
